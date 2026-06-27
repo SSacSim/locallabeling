@@ -273,20 +273,19 @@ body.worker-mode .button.compact {
 }
 
 .folder-picker-card {
-  width: min(720px, 100%);
+  width: min(1120px, calc(100vw - 24px));
 }
 
 .assigned-folder-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 8px;
 }
 
 .assigned-folder-card {
   display: grid;
   gap: 8px;
-  min-width: 180px;
-  max-width: 280px;
+  min-width: 0;
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -324,7 +323,13 @@ body.worker-mode .button.compact {
 .folder-mark-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 4px;
+}
+
+.folder-mark-actions .button {
+  min-width: 0;
+  padding: 0 6px;
+  font-size: 13px;
 }
 
 .toolbar-folder-mark-select {
@@ -1518,5 +1523,13 @@ tr.current-row {
   .labeling-toolbar .toolbar .button,
   .labeling-toolbar .toolbar-folder-mark-select {
     width: auto;
+  }
+
+  .folder-picker-card {
+    width: min(100%, calc(100vw - 24px));
+  }
+
+  .assigned-folder-list {
+    grid-template-columns: 1fr;
   }
 }
