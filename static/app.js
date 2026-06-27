@@ -3,6 +3,9 @@
 
   var TOKEN_KEY = "custom_labeling_token";
   var CLAIM_KEY = "custom_labeling_claim";
+  var IMAGE_PRELOAD_FORWARD_COUNT = 10;
+  var IMAGE_PRELOAD_BACKWARD_COUNT = 1;
+  var IMAGE_PRELOAD_CACHE_LIMIT = 16;
   var DEFAULT_LABEL_COLORS = [
     "#1f77b4",
     "#ff7f0e",
@@ -41,6 +44,9 @@
     initialCheckpointApplied: false,
     annotationClipboard: [],
     annotationRequestId: 0,
+    imagePreloadTimer: 0,
+    imagePreloads: {},
+    imagePreloadOrder: [],
     worker: { projects: [] },
     admin: { users: [], projects: [] },
     adminActiveTab: "projects",
@@ -121,7 +127,7 @@
         confirmPendingBox(parseInt(button.dataset.boxLabelId, 10));
       }
     });
-    els.claimedImage.addEventListener("load", renderAnnotationOverlay);
+    els.claimedImage.addEventListener("load", handleClaimedImageLoad);
     els.imageStage.addEventListener("wheel", handleStageWheel, { passive: false });
     els.imageStage.addEventListener("pointerdown", beginBoxDraw);
     els.imageStage.addEventListener("pointermove", updateBoxDraw);
@@ -213,6 +219,16 @@
       }
     });
 
+    els.workerListBody.addEventListener("click", function (event) {
+      var activeButton = event.target.closest("[data-user-active]");
+      var removeButton = event.target.closest("[data-remove-user]");
+      if (activeButton) {
+        setUserActive(activeButton.dataset.username, activeButton.dataset.userActive === "true");
+      } else if (removeButton) {
+        removeUser(removeButton.dataset.removeUser);
+      }
+    });
+
     els.folderBrowserList.addEventListener("click", function (event) {
       var openButton = event.target.closest("[data-open-folder]");
       var selectButton = event.target.closest("[data-select-folder]");
@@ -259,6 +275,7 @@
       await refreshAll();
     } catch (error) {
       state.token = "";
+      clearImagePreloads();
       localStorage.removeItem(TOKEN_KEY);
       renderAuth();
       setLoginMessage(error.message);
@@ -304,6 +321,7 @@
     state.activeFolder = { projectId: "", folderId: "" };
     state.startAtCheckpoint = false;
     state.initialCheckpointApplied = false;
+    clearImagePreloads();
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(CLAIM_KEY);
     renderAuth();
@@ -574,6 +592,7 @@
     var image = currentImage();
     if (!image) {
       state.annotations = [];
+      clearImagePreloads();
       els.claimedImage.removeAttribute("src");
       els.claimedImage.hidden = true;
       els.emptyState.hidden = false;
@@ -586,6 +605,8 @@
 
     var requestId = state.annotationRequestId + 1;
     state.annotationRequestId = requestId;
+    els.claimedImage.fetchPriority = "high";
+    els.claimedImage.decoding = "async";
     els.claimedImage.src = authenticatedImageUrl(image);
     els.claimedImage.hidden = false;
     els.emptyState.hidden = true;
@@ -612,6 +633,75 @@
       renderAnnotationOverlay();
       setStatus(error.message, "error");
     }
+  }
+
+  function handleClaimedImageLoad() {
+    renderAnnotationOverlay();
+    scheduleNearbyImagePreload();
+  }
+
+  function scheduleNearbyImagePreload() {
+    if (state.imagePreloadTimer) {
+      window.clearTimeout(state.imagePreloadTimer);
+    }
+    state.imagePreloadTimer = window.setTimeout(function () {
+      state.imagePreloadTimer = 0;
+      preloadNearbyImages();
+    }, 80);
+  }
+
+  function preloadNearbyImages() {
+    if (!state.token || state.currentImageIndex < 0 || !state.images.length) {
+      return;
+    }
+    var targets = [];
+    for (var step = 1; step <= IMAGE_PRELOAD_FORWARD_COUNT; step += 1) {
+      if (state.currentImageIndex + step < state.images.length) {
+        targets.push(state.images[state.currentImageIndex + step]);
+      }
+      if (step <= IMAGE_PRELOAD_BACKWARD_COUNT && state.currentImageIndex - step >= 0) {
+        targets.push(state.images[state.currentImageIndex - step]);
+      }
+    }
+    targets.forEach(preloadImage);
+    pruneImagePreloads();
+  }
+
+  function preloadImage(image) {
+    if (!image || !image.url) {
+      return;
+    }
+    var url = authenticatedImageUrl(image);
+    var key = image.id + "|" + url;
+    if (state.imagePreloads[key]) {
+      state.imagePreloads[key].at = Date.now();
+      return;
+    }
+    var preload = new Image();
+    preload.decoding = "async";
+    preload.fetchPriority = "low";
+    state.imagePreloads[key] = { image: preload, at: Date.now() };
+    state.imagePreloadOrder.push(key);
+    preload.onerror = function () {
+      delete state.imagePreloads[key];
+    };
+    preload.src = url;
+  }
+
+  function pruneImagePreloads() {
+    while (state.imagePreloadOrder.length > IMAGE_PRELOAD_CACHE_LIMIT) {
+      var key = state.imagePreloadOrder.shift();
+      delete state.imagePreloads[key];
+    }
+  }
+
+  function clearImagePreloads() {
+    if (state.imagePreloadTimer) {
+      window.clearTimeout(state.imagePreloadTimer);
+      state.imagePreloadTimer = 0;
+    }
+    state.imagePreloads = {};
+    state.imagePreloadOrder = [];
   }
 
   function renderWorkerImageSummary() {
@@ -1846,6 +1936,37 @@
     });
   }
 
+  async function setUserActive(username, active) {
+    if (!username) {
+      return;
+    }
+    await runBusy(active ? "작업자 활성화 중" : "작업자 비활성화 중", async function () {
+      await requestJson("/api/admin/users/active", {
+        method: "POST",
+        body: { username: username, active: active }
+      });
+      setStatus(active ? "작업자를 활성화했습니다." : "작업자를 비활성화했습니다.", "ok");
+      await refreshAll();
+    });
+  }
+
+  async function removeUser(username) {
+    if (!username) {
+      return;
+    }
+    if (!window.confirm("작업자를 삭제할까요? 해당 작업자의 배정 정보도 함께 삭제됩니다.")) {
+      return;
+    }
+    await runBusy("작업자 삭제 중", async function () {
+      await requestJson("/api/admin/users/remove", {
+        method: "POST",
+        body: { username: username }
+      });
+      setStatus("작업자를 삭제했습니다.", "ok");
+      await refreshAll();
+    });
+  }
+
   async function saveProjectFromModal() {
     var name = els.projectNameInput.value.trim();
     var labels = serializeProjectLabels();
@@ -2010,6 +2131,8 @@
     els.filenameSummary.textContent = image ? image.relative_path || image.filename : "-";
     els.imageStatusSummary.textContent = image ? statusForImage(image) : "-";
     if (image) {
+      els.claimedImage.fetchPriority = "high";
+      els.claimedImage.decoding = "async";
       els.claimedImage.src = authenticatedImageUrl(image);
       els.claimedImage.hidden = false;
       els.emptyState.hidden = true;
@@ -2192,7 +2315,10 @@
     var currentUser = els.assignmentUserSelect.value;
     var currentProject = els.assignmentProjectSelect.value;
     els.assignmentUserSelect.innerHTML = users.length
-      ? users.map(function (user) { return '<option value="' + escapeAttribute(user.username) + '">' + escapeHtml(user.username) + "</option>"; }).join("")
+      ? users.map(function (user) {
+        var suffix = user.active === false ? " (비활성)" : "";
+        return '<option value="' + escapeAttribute(user.username) + '">' + escapeHtml(user.username + suffix) + "</option>";
+      }).join("")
       : '<option value="">작업자 없음</option>';
     els.assignmentProjectSelect.innerHTML = projects.length
       ? projects.map(function (project) { return '<option value="' + escapeAttribute(project.id) + '">' + escapeHtml(project.name) + "</option>"; }).join("")
@@ -2302,21 +2428,54 @@
   function projectSummary(project) {
     var folders = project.folders || [];
     var totalImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
-    var labeledImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.labeled) || 0); }, 0);
     var availableImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.available) || 0); }, 0);
-    var completedFolders = folders.filter(function (folder) {
-      var total = Number(folder.total) || 0;
-      return total > 0 && (Number(folder.labeled) || 0) >= total;
-    }).length;
+    var completedFolders = folders.filter(isFolderDone);
+    var reviewFolders = folders.filter(isFolderReview);
+    var completedImages = completedFolders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
+    var reviewImages = reviewFolders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
     return {
       metrics: [
         { label: "YOLO 폴더", value: folders.length + "개" },
-        { label: "완료 폴더", value: completedFolders + "/" + folders.length },
-        { label: "이미지 완료", value: labeledImages + "/" + totalImages },
+        { label: "완료 폴더", value: completedFolders.length + "/" + folders.length },
+        { label: "완료 이미지", value: completedImages + "/" + totalImages },
+        { label: "검수 폴더", value: reviewFolders.length + "/" + folders.length },
+        { label: "검수 이미지", value: reviewImages + "/" + totalImages },
         { label: "작업 가능", value: availableImages + "개" }
       ],
       assignments: projectAssignmentSummary(project)
     };
+  }
+
+  function folderMark(folder) {
+    return folder && folder.mark && typeof folder.mark === "object" ? folder.mark : {};
+  }
+
+  function folderMarkStatus(folder) {
+    return String(folderMark(folder).status || "").trim();
+  }
+
+  function isFolderDone(folder) {
+    return folderMarkStatus(folder) === "done";
+  }
+
+  function isFolderReview(folder) {
+    return folderMarkStatus(folder) === "review";
+  }
+
+  function folderProgressText(folder) {
+    var status = folderMarkStatus(folder);
+    if (status === "done" || status === "review") {
+      return folderMarkStatusText(status);
+    }
+    return folderCheckpointText(folder.checkpoint || {}, folder.total);
+  }
+
+  function folderProgressHtml(folder) {
+    var status = folderMarkStatus(folder);
+    if (status === "done" || status === "review") {
+      return '<span class="status-pill ' + escapeAttribute(status) + '">' + escapeHtml(folderMarkStatusText(status)) + '</span>';
+    }
+    return '<span class="muted">' + escapeHtml(folderProgressText(folder)) + '</span>';
   }
 
   function projectAssignmentSummary(project) {
@@ -2366,7 +2525,7 @@
       var assigned = folderAssignments[folder.id] || [];
       return "<tr>" +
         "<td><strong>" + escapeHtml(folder.name) + "</strong><div class=\"muted\">" + escapeHtml(folder.root_path || "") + "</div></td>" +
-        "<td>" + escapeHtml((Number(folder.labeled) || 0) + "/" + (Number(folder.total) || 0)) + "</td>" +
+        "<td>" + folderProgressHtml(folder) + "</td>" +
         "<td>" + escapeHtml(Number(folder.available) || 0) + "</td>" +
         "<td>" + escapeHtml(Number(folder.claimed) || 0) + "</td>" +
         "<td>" + (assigned.length ? escapeHtml(assigned.join(", ")) : '<span class="muted">없음</span>') + "</td>" +
@@ -2397,13 +2556,22 @@
   function renderWorkerList() {
     var workers = (state.admin.users || []).filter(function (user) { return user.role === "worker"; });
     var rows = workers.map(function (user) {
+      var active = user.active !== false;
+      var activeLabel = active ? "활성" : "비활성";
+      var toggleLabel = active ? "비활성화" : "활성화";
+      var toggleClass = active ? "danger" : "success";
       return "<tr>" +
         "<td><strong>" + escapeHtml(user.username) + "</strong></td>" +
+        '<td><span class="status-pill ' + (active ? "active" : "inactive") + '">' + escapeHtml(activeLabel) + "</span></td>" +
         "<td>" + escapeHtml(assignmentsForUser(user.username).length + "개") + "</td>" +
         "<td>" + escapeHtml(formatDateTime(user.created_at)) + "</td>" +
+        '<td><div class="table-actions">' +
+        '<button class="button ' + toggleClass + ' compact" type="button" data-user-active="' + escapeAttribute(!active) + '" data-username="' + escapeAttribute(user.username) + '">' + escapeHtml(toggleLabel) + "</button>" +
+        '<button class="button danger compact" type="button" data-remove-user="' + escapeAttribute(user.username) + '">삭제</button>' +
+        "</div></td>" +
         "</tr>";
     });
-    els.workerListBody.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="3" class="table-empty">작업자가 없습니다.</td></tr>';
+    els.workerListBody.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="5" class="table-empty">작업자가 없습니다.</td></tr>';
   }
 
   function renderUserAssignments() {
@@ -2572,7 +2740,7 @@
   }
 
   function setLoginMessage(message) {
-    els.loginMessage.textContent = message || "초기 관리자 계정은 admin / admin 입니다.";
+    els.loginMessage.textContent = message || "계정 정보를 입력하세요.";
   }
 
   function formatDateTime(value) {

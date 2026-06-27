@@ -13,14 +13,14 @@
         <div class="form-grid">
           <label class="field-block" for="loginUsernameInput">
             <span class="field-label">아이디</span>
-            <input id="loginUsernameInput" class="text-input" type="text" autocomplete="username" placeholder="admin">
+            <input id="loginUsernameInput" class="text-input" type="text" autocomplete="username" placeholder="아이디">
           </label>
           <label class="field-block" for="loginPasswordInput">
             <span class="field-label">비밀번호</span>
-            <input id="loginPasswordInput" class="text-input" type="password" autocomplete="current-password" placeholder="admin">
+            <input id="loginPasswordInput" class="text-input" type="password" autocomplete="current-password" placeholder="비밀번호">
           </label>
           <button id="loginButton" class="button primary" type="button">로그인</button>
-          <div id="loginMessage" class="muted">초기 관리자 계정은 admin / admin 입니다.</div>
+          <div id="loginMessage" class="muted">계정 정보를 입력하세요.</div>
         </div>
       </section>
 
@@ -178,7 +178,7 @@
                     <thead>
                       <tr>
                         <th scope="col">YOLO 폴더</th>
-                        <th scope="col">완료/전체</th>
+                        <th scope="col">상태/진행</th>
                         <th scope="col">가능</th>
                         <th scope="col">작업 중</th>
                         <th scope="col">할당</th>
@@ -214,12 +214,14 @@
                     <thead>
                       <tr>
                         <th scope="col">작업자</th>
+                        <th scope="col">상태</th>
                         <th scope="col">배정 폴더</th>
                         <th scope="col">생성일</th>
+                        <th scope="col">동작</th>
                       </tr>
                     </thead>
                     <tbody id="workerListBody">
-                      <tr><td colspan="3" class="table-empty">작업자 정보를 불러오는 중입니다.</td></tr>
+                      <tr><td colspan="5" class="table-empty">작업자 정보를 불러오는 중입니다.</td></tr>
                     </tbody>
                   </table>
                 </div>

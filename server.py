@@ -12,6 +12,7 @@ import secrets
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 from typing import Optional
 from urllib.parse import quote
@@ -20,7 +21,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -48,6 +49,7 @@ DEFAULT_LABEL_COLORS = [
     "#637939",
 ]
 CLAIM_TTL_SECONDS = int(os.environ.get("CLAIM_TTL_SECONDS", "1800"))
+IMAGE_CACHE_SECONDS = int(os.environ.get("IMAGE_CACHE_SECONDS", "86400"))
 
 STATE_LOCK = threading.Lock()
 SESSIONS: dict[str, dict] = {}
@@ -72,6 +74,15 @@ class UserCreatePayload(BaseModel):
     username: str
     password: str
     role: str = "worker"
+
+
+class UserActivePayload(BaseModel):
+    username: str
+    active: bool
+
+
+class UserRemovePayload(BaseModel):
+    username: str
 
 
 class ProjectCreatePayload(BaseModel):
@@ -193,6 +204,7 @@ def default_state() -> dict:
                 "username": "admin",
                 "role": "admin",
                 **hash_password("admin"),
+                "active": True,
                 "created_at": utc_iso(),
             }
         },
@@ -232,6 +244,7 @@ def normalize_state(state: dict) -> dict:
     projects = state.get("projects")
     if not isinstance(users, dict) or "admin" not in users:
         users = default_state()["users"]
+    users = normalize_users(users)
     if not isinstance(projects, list):
         projects = []
 
@@ -266,6 +279,31 @@ def normalize_state(state: dict) -> dict:
         )
 
     return {"version": 2, "users": users, "projects": normalized_projects}
+
+
+def normalize_users(raw_users: dict) -> dict:
+    users = {}
+    for username, user in raw_users.items():
+        if not isinstance(user, dict):
+            continue
+        username_key = str(user.get("username") or username or "").strip()
+        role = str(user.get("role") or "worker").strip()
+        password_hash = str(user.get("password_hash") or "").strip()
+        salt = str(user.get("salt") or "").strip()
+        if not username_key or role not in {"admin", "worker"} or not password_hash or not salt:
+            continue
+        users[username_key] = {
+            "username": username_key,
+            "role": role,
+            "password_hash": password_hash,
+            "salt": salt,
+            "active": True if role == "admin" else bool(user.get("active", True)),
+            "created_at": str(user.get("created_at") or utc_iso()),
+        }
+    if "admin" not in users:
+        users["admin"] = default_state()["users"]["admin"]
+    users["admin"]["active"] = True
+    return users
 
 
 def default_label_color(index: int) -> str:
@@ -430,7 +468,12 @@ def verify_password(password: str, user: dict) -> bool:
 
 
 def public_user(username: str, user: dict) -> dict:
-    return {"username": username, "role": user.get("role", "worker"), "created_at": user.get("created_at")}
+    return {
+        "username": username,
+        "role": user.get("role", "worker"),
+        "active": bool(user.get("active", True)),
+        "created_at": user.get("created_at"),
+    }
 
 
 def require_non_empty(value: str | None, field_name: str) -> str:
@@ -443,7 +486,16 @@ def session_user_from_token(token: str) -> dict:
     session = SESSIONS.get(token)
     if not session:
         raise ApiError(401, "invalid_session", "로그인 세션이 만료되었습니다.")
-    return {"token": token, **session}
+    with STATE_LOCK:
+        state = load_state()
+        user = state["users"].get(session.get("username"))
+        if not user:
+            SESSIONS.pop(token, None)
+            raise ApiError(401, "invalid_session", "로그인 세션이 만료되었습니다.")
+        if not bool(user.get("active", True)):
+            SESSIONS.pop(token, None)
+            raise ApiError(403, "user_inactive", "비활성화된 계정입니다. 관리자에게 문의하세요.")
+    return {"token": token, "username": session["username"], "role": user.get("role", "worker"), "created_at": session.get("created_at")}
 
 
 def current_user(authorization: str | None = Header(default=None)) -> dict:
@@ -658,6 +710,39 @@ def sidecar_meta_path_for(folder: dict, rel_path: str) -> Path:
     return Path(folder["labels_path"]).resolve() / ".meta" / Path(meta_rel.as_posix())
 
 
+def image_cache_headers(path: Path) -> tuple[dict[str, str], os.stat_result]:
+    stat_result = path.stat()
+    etag = f'W/"{stat_result.st_mtime_ns:x}-{stat_result.st_size:x}"'
+    return (
+        {
+            "Cache-Control": f"private, max-age={IMAGE_CACHE_SECONDS}",
+            "ETag": etag,
+            "Last-Modified": formatdate(stat_result.st_mtime, usegmt=True),
+        },
+        stat_result,
+    )
+
+
+def is_image_not_modified(request: Request, etag: str, stat_result: os.stat_result) -> bool:
+    if_none_match = request.headers.get("if-none-match", "")
+    if if_none_match:
+        requested_etags = [value.strip() for value in if_none_match.split(",")]
+        if "*" in requested_etags or etag in requested_etags:
+            return True
+
+    if_modified_since = request.headers.get("if-modified-since")
+    if if_modified_since:
+        try:
+            since = parsedate_to_datetime(if_modified_since)
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            modified_at = datetime.fromtimestamp(int(stat_result.st_mtime), timezone.utc)
+            return modified_at <= since.astimezone(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return False
+
+
 def image_id(project_id: str, folder_id: str, rel_path: str) -> str:
     return f"{project_id}/{folder_id}/{rel_path}"
 
@@ -757,8 +842,35 @@ def folder_checkpoint_summary(folder: dict, checkpoint: dict | None) -> dict:
     }
 
 
+def folder_mark_summary(project: dict, folder_id: str) -> dict:
+    latest = None
+    for username, folder_marks in project.get("folder_marks", {}).items():
+        if not isinstance(folder_marks, dict):
+            continue
+        mark = folder_marks.get(folder_id)
+        if not isinstance(mark, dict):
+            continue
+        status = str(mark.get("status") or "").strip()
+        if status not in {"working", "done", "review"}:
+            continue
+        candidate = {
+            "username": username,
+            "status": status,
+            "updated_at": str(mark.get("updated_at") or ""),
+        }
+        if latest is None or candidate["updated_at"] >= latest["updated_at"]:
+            latest = candidate
+    return latest or {}
+
+
 def public_project(project: dict, include_stats: bool = True) -> dict:
-    folders = [folder_stats(project, folder) if include_stats else folder for folder in project["folders"]]
+    folders = []
+    folder_checkpoints = project.get("folder_checkpoints", {})
+    for folder in project["folders"]:
+        folder_data = folder_stats(project, folder) if include_stats else dict(folder)
+        folder_data["mark"] = folder_mark_summary(project, folder["id"])
+        folder_data["checkpoint"] = folder_checkpoint_summary(folder, folder_checkpoints.get(folder["id"]))
+        folders.append(folder_data)
     return {
         "id": project["id"],
         "name": project["name"],
@@ -871,10 +983,54 @@ def create_user(payload: UserCreatePayload) -> dict:
             "username": username,
             "role": role,
             **hash_password(password),
+            "active": True,
             "created_at": utc_iso(),
         }
         write_state(state)
         return {"ok": True, "user": public_user(username, state["users"][username])}
+
+
+def remove_user_runtime_state(username: str) -> None:
+    for token, session in list(SESSIONS.items()):
+        if session.get("username") == username:
+            SESSIONS.pop(token, None)
+    for claim_id, claim in list(CLAIMS.items()):
+        if claim.get("username") == username:
+            CLAIMS.pop(claim_id, None)
+
+
+def set_user_active(payload: UserActivePayload) -> dict:
+    username = require_non_empty(payload.username, "username")
+    with STATE_LOCK:
+        state = load_state()
+        user = state["users"].get(username)
+        if not user:
+            raise ApiError(404, "user_not_found", "사용자를 찾을 수 없습니다.")
+        if user.get("role") == "admin":
+            raise ApiError(400, "admin_user_locked", "관리자 계정은 비활성화할 수 없습니다.")
+        user["active"] = bool(payload.active)
+        if not user["active"]:
+            remove_user_runtime_state(username)
+        write_state(state)
+        return {"ok": True, "user": public_user(username, user)}
+
+
+def remove_user(payload: UserRemovePayload) -> dict:
+    username = require_non_empty(payload.username, "username")
+    with STATE_LOCK:
+        state = load_state()
+        user = state["users"].get(username)
+        if not user:
+            raise ApiError(404, "user_not_found", "사용자를 찾을 수 없습니다.")
+        if user.get("role") == "admin":
+            raise ApiError(400, "admin_user_locked", "관리자 계정은 삭제할 수 없습니다.")
+        state["users"].pop(username, None)
+        for project in state["projects"]:
+            project.get("assignments", {}).pop(username, None)
+            project.get("folder_marks", {}).pop(username, None)
+        remove_user_runtime_state(username)
+        write_state(state)
+    return {"ok": True, "username": username}
 
 
 def create_project(payload: ProjectCreatePayload) -> dict:
@@ -1425,6 +1581,8 @@ def api_login(payload: LoginPayload) -> dict:
         user = state["users"].get(username)
         if not user or not verify_password(password, user):
             raise ApiError(401, "login_failed", "아이디 또는 비밀번호가 올바르지 않습니다.")
+        if not bool(user.get("active", True)):
+            raise ApiError(403, "user_inactive", "비활성화된 계정입니다. 관리자에게 문의하세요.")
         token = secrets.token_urlsafe(32)
         SESSIONS[token] = {"username": username, "role": user.get("role", "worker"), "created_at": utc_iso()}
         return {"token": token, "user": public_user(username, user)}
@@ -1454,6 +1612,16 @@ def api_admin_folders_browse(path: str = Query(default=""), _: dict = Depends(re
 @app.post("/api/admin/users", status_code=201)
 def api_admin_users(payload: UserCreatePayload, _: dict = Depends(require_admin)) -> dict:
     return create_user(payload)
+
+
+@app.post("/api/admin/users/active")
+def api_admin_users_active(payload: UserActivePayload, _: dict = Depends(require_admin)) -> dict:
+    return set_user_active(payload)
+
+
+@app.post("/api/admin/users/remove")
+def api_admin_users_remove(payload: UserRemovePayload, _: dict = Depends(require_admin)) -> dict:
+    return remove_user(payload)
 
 
 @app.post("/api/admin/projects", status_code=201)
@@ -1552,7 +1720,13 @@ def api_release(payload: ReleasePayload, user: dict = Depends(current_user)) -> 
 
 
 @app.get("/images/{project_id}/{folder_id}/{image_path:path}")
-def api_image_file(project_id: str, folder_id: str, image_path: str, user: dict = Depends(image_request_user)) -> FileResponse:
+def api_image_file(
+    request: Request,
+    project_id: str,
+    folder_id: str,
+    image_path: str,
+    user: dict = Depends(image_request_user),
+) -> Response:
     with STATE_LOCK:
         state = load_state()
         project = project_by_id(state, project_id)
@@ -1560,7 +1734,10 @@ def api_image_file(project_id: str, folder_id: str, image_path: str, user: dict 
             raise ApiError(403, "folder_not_assigned", "배정되지 않은 작업 폴더입니다.")
         folder = folder_by_id(project, folder_id)
         path = image_path_for(folder, image_path)
-    return FileResponse(path)
+    headers, stat_result = image_cache_headers(path)
+    if is_image_not_modified(request, headers["ETag"], stat_result):
+        return Response(status_code=304, headers=headers)
+    return FileResponse(path, headers=headers, stat_result=stat_result)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
