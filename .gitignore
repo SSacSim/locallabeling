@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+data/images/*
+!data/images/.gitkeep
+data/labels/*
+!data/labels/.gitkeep
+data/workspaces.json
+data/app_state.json
+.venv/
+venv/
+.env

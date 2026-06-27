@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>이미지 라벨링</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="loginPanel" class="login-panel" aria-label="로그인">
+        <div class="panel-title">로그인</div>
+        <div class="form-grid">
+          <label class="field-block" for="loginUsernameInput">
+            <span class="field-label">아이디</span>
+            <input id="loginUsernameInput" class="text-input" type="text" autocomplete="username" placeholder="admin">
+          </label>
+          <label class="field-block" for="loginPasswordInput">
+            <span class="field-label">비밀번호</span>
+            <input id="loginPasswordInput" class="text-input" type="password" autocomplete="current-password" placeholder="admin">
+          </label>
+          <button id="loginButton" class="button primary" type="button">로그인</button>
+          <div id="loginMessage" class="muted">초기 관리자 계정은 admin / admin 입니다.</div>
+        </div>
+      </section>
+
+      <section id="appPanel" hidden>
+        <header class="topbar" aria-label="세션 정보">
+          <div class="identity-group">
+            <span class="field-label">로그인 사용자</span>
+            <strong id="currentUserSummary">-</strong>
+          </div>
+
+          <div class="toolbar" aria-label="세션 동작">
+            <span id="checkpointSummary" class="checkpoint-summary">체크포인트 -</span>
+            <button id="refreshButton" class="button secondary" type="button">새로고침</button>
+            <button id="logoutButton" class="button secondary" type="button">로그아웃</button>
+          </div>
+
+          <div class="status-message session-status" id="statusMessage" aria-live="polite">대기 중</div>
+        </header>
+
+        <section id="workerPanel" class="worker-panel labeling-worker" aria-label="작업자" hidden>
+          <section class="labeling-shell">
+            <section class="labeling-main" aria-label="이미지 라벨링">
+              <div class="labeling-toolbar">
+                <div>
+                  <div class="panel-title">이미지 라벨링</div>
+                  <div id="workerKeyboardHint" class="muted">A 이전, D 다음, W 박스 그리기</div>
+                </div>
+                <div class="toolbar" aria-label="이미지 이동 및 저장">
+                  <button id="openFolderPickerButton" class="button secondary compact" type="button">작업 폴더 선택</button>
+                  <button id="prevImageButton" class="button secondary compact" type="button">이전</button>
+                  <button id="nextImageButton" class="button secondary compact" type="button">다음</button>
+                  <button id="drawBoxButton" class="button primary compact" type="button">박스 그리기</button>
+                  <button id="saveAnnotationsButton" class="button success compact" type="button" disabled>저장</button>
+                </div>
+              </div>
+
+              <div class="image-stage labeling-stage" id="imageStage" tabindex="0">
+                <div class="empty-state" id="emptyState">
+                  <strong>배정된 이미지가 없습니다</strong>
+                  <span>관리자가 프로젝트와 폴더를 할당하면 이미지가 표시됩니다.</span>
+                </div>
+                <img id="claimedImage" alt="현재 작업 이미지" draggable="false" hidden>
+                <svg id="annotationOverlay" class="annotation-overlay" aria-hidden="true"></svg>
+                <div id="boxLabelPicker" class="box-label-picker" hidden>
+                  <div class="field-label">라벨 선택</div>
+                  <div id="boxLabelList" class="box-label-list"></div>
+                  <div class="button-row">
+                    <button id="cancelBoxLabelButton" class="button secondary compact" type="button">취소</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="image-meta">
+                <div>
+                  <span class="meta-label">파일</span>
+                  <strong id="filenameSummary">-</strong>
+                </div>
+                <div>
+                  <span class="meta-label">프로젝트</span>
+                  <strong id="projectSummary">-</strong>
+                </div>
+                <div>
+                  <span class="meta-label">상태</span>
+                  <strong id="imageStatusSummary">-</strong>
+                </div>
+              </div>
+            </section>
+
+            <aside class="annotation-panel" aria-label="라벨링 목록">
+              <div>
+                <div class="panel-title">라벨링 목록</div>
+                <div id="currentImageCounter" class="muted">-</div>
+              </div>
+              <div class="annotation-actions">
+                <button id="refreshImagesButton" class="button secondary compact" type="button">목록 새로고침</button>
+              </div>
+              <div id="annotationList" class="annotation-list">
+                <div class="table-empty">이미지를 불러오는 중입니다.</div>
+              </div>
+            </aside>
+          </section>
+
+          <button id="releaseButton" type="button" disabled hidden>작업 반납</button>
+          <button id="saveButton" type="button" disabled hidden>라벨 저장</button>
+          <strong id="claimSummary" hidden>없음</strong>
+          <strong id="expiresSummary" hidden>-</strong>
+          <select id="labelInput" hidden></select>
+          <div id="quickLabels" hidden></div>
+          <textarea id="notesInput" hidden></textarea>
+          <div id="statsGrid" hidden></div>
+          <div id="listSummary" hidden>-</div>
+          <table hidden><tbody id="imageListBody"></tbody></table>
+        </section>
+
+        <section id="folderPickerModal" class="modal-layer" aria-label="작업 폴더 선택" role="dialog" aria-modal="true" hidden>
+          <div class="modal-card folder-picker-card">
+            <div class="modal-header">
+              <div>
+                <div class="panel-title">작업 폴더 선택</div>
+                  <div class="muted">배정된 폴더를 선택하면 해당 폴더의 미진행 이미지부터 시작합니다.</div>
+              </div>
+              <button id="closeFolderPickerButton" class="icon-button" type="button" aria-label="닫기">×</button>
+            </div>
+            <div class="modal-body">
+              <button id="claimButton" class="button secondary" type="button">전체에서 시작</button>
+              <div id="assignedFolderList" class="assigned-folder-list">
+                <div class="table-empty">배정 폴더를 불러오는 중입니다.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="adminPanel" class="admin-panel" aria-label="관리자 대시보드" hidden>
+          <aside class="admin-sidebar" aria-label="관리 메뉴">
+            <div>
+              <div class="panel-title">관리 대시보드</div>
+              <div class="muted">프로젝트, 작업자, 할당 관리</div>
+            </div>
+            <nav class="admin-tabs" aria-label="관리 탭">
+              <button id="adminProjectsTab" class="admin-tab active" type="button" data-admin-tab="projects">프로젝트</button>
+              <button id="adminWorkersTab" class="admin-tab" type="button" data-admin-tab="workers">작업자</button>
+              <button id="adminAssignmentsTab" class="admin-tab" type="button" data-admin-tab="assignments">할당</button>
+              <button id="adminProgressTab" class="admin-tab" type="button" data-admin-tab="progress">진행상황</button>
+            </nav>
+          </aside>
+
+          <section class="admin-content">
+            <div class="content-header">
+              <div>
+                <div id="adminViewTitle" class="panel-title">프로젝트</div>
+                <div id="adminViewDescription" class="muted">프로젝트 목록과 접근 폴더를 관리합니다.</div>
+              </div>
+              <div class="button-row">
+                <button id="openProjectModalButton" class="button primary compact" type="button">프로젝트 생성</button>
+                <button id="adminRefreshButton" class="button secondary compact" type="button">새로고침</button>
+              </div>
+            </div>
+
+            <section id="adminProjectsView" class="admin-view" aria-label="프로젝트 관리">
+              <div id="projectList" class="project-list"></div>
+            </section>
+
+            <section id="adminProgressView" class="admin-view" aria-label="진행상황" hidden>
+              <section class="admin-section">
+                <div class="section-header">
+                  <div>
+                    <div class="panel-title">프로젝트 진행상황</div>
+                    <div class="muted">프로젝트별 폴더 완료율과 배정 현황을 확인합니다.</div>
+                  </div>
+                  <select id="progressProjectSelect" class="text-input compact-select"></select>
+                </div>
+                <div id="progressSummaryGrid" class="progress-summary-grid"></div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">YOLO 폴더</th>
+                        <th scope="col">완료/전체</th>
+                        <th scope="col">가능</th>
+                        <th scope="col">작업 중</th>
+                        <th scope="col">할당</th>
+                      </tr>
+                    </thead>
+                    <tbody id="progressFolderBody">
+                      <tr><td colspan="5" class="table-empty">프로젝트를 선택하세요.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+
+            <section id="adminWorkersView" class="admin-view" aria-label="작업자 관리" hidden>
+              <section class="admin-section">
+                <div class="panel-title">작업자 생성</div>
+                <div class="form-grid worker-create-grid">
+                  <input id="newUsernameInput" class="text-input" type="text" autocomplete="off" placeholder="작업자 아이디">
+                  <input id="newPasswordInput" class="text-input" type="password" autocomplete="new-password" placeholder="비밀번호">
+                  <input id="newRoleSelect" type="hidden" value="worker">
+                  <div class="button-row">
+                    <button id="createUserButton" class="button primary" type="button">작업자 생성</button>
+                    <button id="createTempUserButton" class="button secondary" type="button">임시 계정 생성</button>
+                  </div>
+                  <div id="tempCredentialOutput" class="credential-output" hidden></div>
+                </div>
+              </section>
+
+              <section class="admin-section">
+                <div class="panel-title">작업자 목록</div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">작업자</th>
+                        <th scope="col">배정 폴더</th>
+                        <th scope="col">생성일</th>
+                      </tr>
+                    </thead>
+                    <tbody id="workerListBody">
+                      <tr><td colspan="3" class="table-empty">작업자 정보를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+
+            <section id="adminAssignmentsView" class="admin-view" aria-label="작업 할당" hidden>
+              <section class="admin-section">
+                <div class="panel-title">작업 폴더 할당</div>
+                <div class="assignment-layout">
+                  <div class="form-grid">
+                    <select id="assignmentUserSelect" class="text-input"></select>
+                    <select id="assignmentProjectSelect" class="text-input"></select>
+                    <button id="saveAssignmentButton" class="button success" type="button">선택 폴더 배정 저장</button>
+                  </div>
+                  <div id="assignmentFolderChecklist" class="checklist"></div>
+                </div>
+              </section>
+
+              <section class="admin-section">
+                <div class="panel-title">현재 할당 현황</div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">작업자</th>
+                        <th scope="col">프로젝트별 배정</th>
+                        <th scope="col">총 폴더</th>
+                      </tr>
+                    </thead>
+                    <tbody id="userAssignmentBody">
+                      <tr><td colspan="3" class="table-empty">할당 정보를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+          </section>
+        </section>
+
+        <section id="projectModal" class="modal-layer" aria-label="프로젝트 생성" role="dialog" aria-modal="true" hidden>
+          <div class="modal-card">
+            <div class="modal-header">
+              <div>
+                <div id="projectModalTitle" class="panel-title">프로젝트 생성</div>
+                <div id="projectModalDescription" class="muted">프로젝트 이름, 라벨 목록, 서버 로컬 접근 폴더를 설정합니다.</div>
+              </div>
+              <button id="closeProjectModalButton" class="icon-button" type="button" aria-label="닫기">×</button>
+            </div>
+
+            <div class="modal-body">
+              <section class="modal-section">
+                <label class="field-block" for="projectNameInput">
+                  <span class="field-label">프로젝트 이름</span>
+                  <input id="projectNameInput" class="text-input" type="text" autocomplete="off" placeholder="프로젝트 이름">
+                </label>
+                <div class="field-block">
+                  <span class="field-label">라벨 목록</span>
+                  <div class="label-add-row">
+                    <input id="projectLabelNameInput" class="text-input" type="text" autocomplete="off" placeholder="라벨 이름">
+                    <input id="projectLabelColorInput" class="label-color-input" type="color" value="#d62728" aria-label="라벨 색상">
+                    <button id="addProjectLabelButton" class="button secondary compact" type="button" aria-label="라벨 추가">+</button>
+                  </div>
+                  <div id="projectLabelList" class="label-editor-list"></div>
+                  <textarea id="projectLabelsInput" hidden></textarea>
+                </div>
+              </section>
+
+              <section class="modal-section">
+                <div class="section-header">
+                  <div>
+                    <div class="panel-title">접근 폴더 선택</div>
+                    <div class="muted">images 폴더를 가진 YOLO 폴더 또는 그 상위 폴더를 선택합니다. labels 폴더가 없으면 자동 생성됩니다.</div>
+                  </div>
+                  <button id="clearSelectedFoldersButton" class="button secondary compact" type="button">선택 초기화</button>
+                </div>
+                <div id="selectedFolderList" class="selected-folder-list"></div>
+
+                <div class="folder-browser">
+                  <div class="folder-path-row">
+                    <button id="folderUpButton" class="button secondary compact" type="button">상위</button>
+                    <input id="folderPathInput" class="text-input" type="text" autocomplete="off" placeholder="예: D:\dataset_A">
+                    <button id="browseFolderPathButton" class="button secondary compact" type="button">이동</button>
+                    <button id="selectCurrentFolderButton" class="button secondary compact" type="button">현재 폴더 선택</button>
+                  </div>
+                  <div id="folderCurrentPath" class="muted">폴더를 불러오지 않았습니다.</div>
+                  <div id="folderBrowserList" class="folder-list">
+                    <div class="table-empty">프로젝트 생성을 누르기 전에 접근 폴더를 선택하세요.</div>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div class="modal-footer">
+              <button id="cancelProjectModalButton" class="button secondary" type="button">취소</button>
+              <button id="createProjectButton" class="button primary" type="button">프로젝트 생성</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
