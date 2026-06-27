@@ -3,6 +3,7 @@
 
   var TOKEN_KEY = "custom_labeling_token";
   var CLAIM_KEY = "custom_labeling_claim";
+  var PASTE_MODE_KEY = "custom_labeling_paste_mode";
   var IMAGE_PRELOAD_FORWARD_COUNT = 20;
   var IMAGE_PRELOAD_BACKWARD_COUNT = 20;
   var IMAGE_PRELOAD_CACHE_LIMIT = 45;
@@ -44,6 +45,7 @@
     startAtCheckpoint: false,
     initialCheckpointApplied: false,
     annotationClipboard: [],
+    annotationPasteMode: "replace",
     annotationRequestId: 0,
     imagePreloadTimer: 0,
     imagePreloads: {},
@@ -64,6 +66,8 @@
   function init() {
     bindElements();
     attachEvents();
+    state.annotationPasteMode = getStoredAnnotationPasteMode();
+    renderAnnotationPasteMode();
     state.token = localStorage.getItem(TOKEN_KEY) || "";
     state.claim = getStoredClaim();
     if (state.token) {
@@ -81,7 +85,7 @@
       "emptyState", "imageLoadingState", "imageStage", "claimedImage", "filenameSummary", "imageStatusSummary", "labelInput", "quickLabels",
       "notesInput", "statsGrid", "listSummary", "imageListBody", "prevImageButton", "nextImageButton",
       "drawBoxButton", "saveAnnotationsButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
-      "cancelBoxLabelButton", "annotationList", "currentImageCounter",
+      "cancelBoxLabelButton", "annotationList", "currentImageCounter", "replacePasteModeButton", "appendPasteModeButton",
       "workerKeyboardHint", "openFolderPickerButton", "toolbarFolderMarkSelect", "folderPickerModal", "closeFolderPickerButton",
       "assignedFolderList", "adminPanel", "adminRefreshButton",
       "adminProjectsTab", "adminWorkersTab", "adminAssignmentsTab", "adminProgressTab",
@@ -276,10 +280,25 @@
         removeAnnotation(parseInt(removeButton.dataset.removeAnnotation, 10));
         return;
       }
+      if (event.target.closest(".annotation-copy-check")) {
+        return;
+      }
       var row = event.target.closest("[data-select-annotation]");
       if (row) {
         selectAnnotation(parseInt(row.dataset.selectAnnotation, 10));
       }
+    });
+    els.annotationList.addEventListener("change", function (event) {
+      var checkbox = event.target.closest("[data-copy-annotation]");
+      if (checkbox) {
+        setAnnotationCopyEnabled(parseInt(checkbox.dataset.copyAnnotation, 10), checkbox.checked);
+      }
+    });
+    els.replacePasteModeButton.addEventListener("click", function () {
+      setAnnotationPasteMode("replace");
+    });
+    els.appendPasteModeButton.addEventListener("click", function () {
+      setAnnotationPasteMode("append");
     });
   }
 
@@ -638,7 +657,7 @@
       if (requestId !== state.annotationRequestId) {
         return;
       }
-      state.annotations = Array.isArray(data.annotations) ? data.annotations : [];
+      state.annotations = normalizeAnnotationCopyDefaults(Array.isArray(data.annotations) ? data.annotations : []);
       state.annotationsDirty = false;
       if (data.image) {
         state.images[state.currentImageIndex] = data.image;
@@ -1460,7 +1479,8 @@
       x: state.pendingBox.x,
       y: state.pendingBox.y,
       width: state.pendingBox.width,
-      height: state.pendingBox.height
+      height: state.pendingBox.height,
+      copy_enabled: true
     });
     state.annotationsDirty = true;
     state.pendingBox = null;
@@ -1504,8 +1524,10 @@
   }
 
   function captureAnnotationClipboard() {
-    state.annotationClipboard = state.annotations.map(function (annotation) {
-      return cloneAnnotation(annotation);
+    state.annotationClipboard = state.annotations.filter(annotationCopyEnabled).map(function (annotation) {
+      var copy = cloneAnnotation(annotation);
+      copy.copy_enabled = true;
+      return copy;
     });
   }
 
@@ -1532,6 +1554,7 @@
       }
       copy.label_name = labelsById[copy.label_id].name;
       copy.label_color = labelsById[copy.label_id].color;
+      copy.copy_enabled = true;
       items.push(copy);
       return items;
     }, []);
@@ -1541,13 +1564,15 @@
     }
     cancelPendingBox();
     cancelBoxDraw();
-    state.annotations = pasted;
+    var appendMode = state.annotationPasteMode === "append";
+    var previousCount = state.annotations.length;
+    state.annotations = appendMode ? state.annotations.concat(pasted) : pasted;
     state.annotationsDirty = true;
-    state.selectedAnnotationIndex = -1;
+    state.selectedAnnotationIndex = appendMode ? previousCount : -1;
     renderAnnotationList();
     renderAnnotationOverlay();
     renderButtons();
-    setStatus("이전 라벨링 " + pasted.length + "개를 붙여넣었습니다." + (skipped ? " 맞지 않는 라벨 " + skipped + "개는 제외했습니다." : ""), "ok");
+    setStatus("이전 라벨링 " + pasted.length + "개를 " + (appendMode ? "추가했습니다." : "붙여넣었습니다.") + (skipped ? " 맞지 않는 라벨 " + skipped + "개는 제외했습니다." : ""), "ok");
   }
 
   function cloneAnnotation(annotation) {
@@ -1558,8 +1583,68 @@
       x: Number(annotation.x),
       y: Number(annotation.y),
       width: Number(annotation.width),
-      height: Number(annotation.height)
+      height: Number(annotation.height),
+      copy_enabled: annotationCopyEnabled(annotation)
     };
+  }
+
+  function annotationCopyEnabled(annotation) {
+    return !annotation || annotation.copy_enabled !== false;
+  }
+
+  function normalizeAnnotationCopyDefaults(annotations) {
+    var checkedByDefault = state.annotationPasteMode !== "append";
+    return annotations.map(function (annotation) {
+      if (annotation && annotation.copy_enabled === undefined) {
+        annotation.copy_enabled = checkedByDefault;
+      }
+      return annotation;
+    });
+  }
+
+  function applyPreviousAnnotationCopyState(annotations, previousAnnotations) {
+    return annotations.map(function (annotation, index) {
+      annotation.copy_enabled = previousAnnotations[index] ? annotationCopyEnabled(previousAnnotations[index]) : true;
+      return annotation;
+    });
+  }
+
+  function setAnnotationCopyEnabled(index, enabled) {
+    if (Number.isNaN(index) || index < 0 || index >= state.annotations.length) {
+      return;
+    }
+    state.annotations[index].copy_enabled = Boolean(enabled);
+    renderAnnotationList();
+  }
+
+  function setAllAnnotationCopyEnabled(enabled) {
+    state.annotations.forEach(function (annotation) {
+      annotation.copy_enabled = Boolean(enabled);
+    });
+    renderAnnotationList();
+  }
+
+  function getStoredAnnotationPasteMode() {
+    return localStorage.getItem(PASTE_MODE_KEY) === "append" ? "append" : "replace";
+  }
+
+  function setAnnotationPasteMode(mode) {
+    state.annotationPasteMode = mode === "append" ? "append" : "replace";
+    localStorage.setItem(PASTE_MODE_KEY, state.annotationPasteMode);
+    setAllAnnotationCopyEnabled(state.annotationPasteMode !== "append");
+    renderAnnotationPasteMode();
+  }
+
+  function renderAnnotationPasteMode() {
+    var appendMode = state.annotationPasteMode === "append";
+    if (els.replacePasteModeButton) {
+      els.replacePasteModeButton.classList.toggle("active", !appendMode);
+      els.replacePasteModeButton.setAttribute("aria-pressed", appendMode ? "false" : "true");
+    }
+    if (els.appendPasteModeButton) {
+      els.appendPasteModeButton.classList.toggle("active", appendMode);
+      els.appendPasteModeButton.setAttribute("aria-pressed", appendMode ? "true" : "false");
+    }
   }
 
   function labelColorForAnnotation(annotation) {
@@ -1660,6 +1745,9 @@
       var color = labelColorForAnnotation(annotation);
       var selected = index === state.selectedAnnotationIndex;
       return '<div class="annotation-row' + (selected ? " selected" : "") + '" data-select-annotation="' + escapeAttribute(index) + '">' +
+        '<label class="annotation-copy-check" title="Ctrl+V 복사 대상">' +
+        '<input type="checkbox" data-copy-annotation="' + escapeAttribute(index) + '"' + (annotationCopyEnabled(annotation) ? " checked" : "") + ' aria-label="' + escapeAttribute(index + 1 + "번 복사 대상") + '">' +
+        '</label>' +
         '<div><strong><i class="annotation-color-dot" style="--label-color: ' + escapeAttribute(color) + ';"></i>' + escapeHtml(index + 1 + ". " + annotation.label_name) + '</strong>' +
         '<span>' + escapeHtml("x " + percent(annotation.x) + ", y " + percent(annotation.y) + ", w " + percent(annotation.width) + ", h " + percent(annotation.height)) + '</span></div>' +
         '<button class="button danger compact" type="button" data-remove-annotation="' + escapeAttribute(index) + '">삭제</button>' +
@@ -1690,6 +1778,7 @@
       throw new Error("저장할 이미지가 없습니다.");
     }
     var completeClaim = Boolean(opts.completeClaim);
+    var previousAnnotations = state.annotations.slice();
     var data = await requestJson("/api/annotations", {
       method: "POST",
       body: {
@@ -1706,7 +1795,9 @@
         })
       }
     });
-    state.annotations = Array.isArray(data.annotations) ? data.annotations : state.annotations;
+    state.annotations = Array.isArray(data.annotations)
+      ? applyPreviousAnnotationCopyState(data.annotations, previousAnnotations)
+      : state.annotations;
     state.annotationsDirty = false;
     if (data.image) {
       state.images[state.currentImageIndex] = data.image;

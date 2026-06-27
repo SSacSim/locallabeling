@@ -104,6 +104,10 @@
                 <div id="currentImageCounter" class="muted">-</div>
               </div>
               <div class="annotation-actions">
+                <div class="annotation-copy-mode" role="group" aria-label="Ctrl+V 복사 모드">
+                  <button id="replacePasteModeButton" class="copy-mode-button active" type="button" aria-pressed="true" title="기존 박스를 지우고 체크된 이전 박스를 복사합니다.">전체 복사</button>
+                  <button id="appendPasteModeButton" class="copy-mode-button" type="button" aria-pressed="false" title="현재 박스를 유지하고 체크된 이전 박스를 추가합니다.">추가 객체</button>
+                </div>
                 <button id="refreshImagesButton" class="button secondary compact" type="button">목록 새로고침</button>
               </div>
               <div id="annotationList" class="annotation-list">

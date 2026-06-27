@@ -403,6 +403,39 @@ body.worker-mode .labeling-toolbar {
 
 .annotation-actions {
   display: grid;
+  gap: 8px;
+}
+
+.annotation-copy-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #edf3f7;
+}
+
+.copy-mode-button {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.copy-mode-button.active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.copy-mode-button:focus-visible {
+  outline: 3px solid rgba(23, 105, 170, 0.22);
+  outline-offset: 1px;
 }
 
 .annotation-list {
@@ -415,7 +448,7 @@ body.worker-mode .labeling-toolbar {
 
 .annotation-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   padding: 10px;
@@ -432,6 +465,21 @@ body.worker-mode .labeling-toolbar {
   border-color: var(--primary);
   background: #eef6fd;
   box-shadow: 0 0 0 3px rgba(23, 105, 170, 0.12);
+}
+
+.annotation-copy-check {
+  display: grid;
+  place-items: center;
+  align-self: start;
+  padding-top: 2px;
+  cursor: pointer;
+}
+
+.annotation-copy-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
 }
 
 .annotation-row div {
