@@ -81,7 +81,7 @@
       "notesInput", "statsGrid", "listSummary", "imageListBody", "prevImageButton", "nextImageButton",
       "drawBoxButton", "saveAnnotationsButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
       "cancelBoxLabelButton", "annotationList", "currentImageCounter",
-      "workerKeyboardHint", "openFolderPickerButton", "folderPickerModal", "closeFolderPickerButton",
+      "workerKeyboardHint", "openFolderPickerButton", "toolbarFolderMarkSelect", "folderPickerModal", "closeFolderPickerButton",
       "assignedFolderList", "adminPanel", "adminRefreshButton",
       "adminProjectsTab", "adminWorkersTab", "adminAssignmentsTab", "adminProgressTab",
       "adminProjectsView", "adminWorkersView", "adminAssignmentsView", "adminProgressView",
@@ -109,6 +109,15 @@
     els.logoutButton.addEventListener("click", logout);
     els.claimButton.addEventListener("click", function () { openWorkerFolder("", ""); });
     els.openFolderPickerButton.addEventListener("click", openFolderPicker);
+    els.toolbarFolderMarkSelect.addEventListener("change", function () {
+      var activeFolder = activeAssignedFolder();
+      if (!activeFolder) {
+        els.toolbarFolderMarkSelect.value = "working";
+        setStatus("먼저 작업 폴더를 선택하세요.", "error");
+        return;
+      }
+      setWorkerFolderMark(activeFolder.projectId, activeFolder.folderId, els.toolbarFolderMarkSelect.value, { reopenPicker: false });
+    });
     els.closeFolderPickerButton.addEventListener("click", closeFolderPicker);
     els.saveButton.addEventListener("click", saveLabel);
     els.releaseButton.addEventListener("click", releaseClaim);
@@ -263,6 +272,11 @@
       var removeButton = event.target.closest("[data-remove-annotation]");
       if (removeButton) {
         removeAnnotation(parseInt(removeButton.dataset.removeAnnotation, 10));
+        return;
+      }
+      var row = event.target.closest("[data-select-annotation]");
+      if (row) {
+        selectAnnotation(parseInt(row.dataset.selectAnnotation, 10));
       }
     });
   }
@@ -715,6 +729,7 @@
       els.checkpointSummary.textContent = checkpointSummaryText();
     }
     els.workerKeyboardHint.textContent = state.drawMode ? "박스를 드래그하세요. Esc 취소" : "A 이전, D 다음, W 박스 그리기";
+    renderToolbarFolderMarkActions();
   }
 
   function renderAssignedFolders() {
@@ -764,6 +779,33 @@
       });
     });
     return results;
+  }
+
+  function activeAssignedFolder() {
+    var folders = assignedWorkerFolders();
+    if (state.activeFolder.projectId && state.activeFolder.folderId) {
+      return folders.find(function (folder) {
+        return folder.projectId === state.activeFolder.projectId && folder.folderId === state.activeFolder.folderId;
+      }) || null;
+    }
+    var image = currentImage();
+    if (image) {
+      return folders.find(function (folder) {
+        return folder.projectId === image.project_id && folder.folderId === image.folder_id;
+      }) || null;
+    }
+    return null;
+  }
+
+  function renderToolbarFolderMarkActions() {
+    if (!els.toolbarFolderMarkSelect) {
+      return;
+    }
+    var folder = activeAssignedFolder();
+    var status = folder && folder.workerMark && folder.workerMark.status ? folder.workerMark.status : "working";
+    var disabled = state.busy || !folder;
+    els.toolbarFolderMarkSelect.value = status;
+    els.toolbarFolderMarkSelect.disabled = disabled;
   }
 
   function folderCheckpointText(checkpoint, totalFallback) {
@@ -1154,6 +1196,7 @@
     cancelPendingBox();
     state.drawMode = false;
     state.selectedAnnotationIndex = index;
+    renderAnnotationList();
     state.boxInteraction = {
       index: index,
       mode: target.dataset.resizeHandle ? "resize" : "move",
@@ -1538,6 +1581,20 @@
     }).join("");
   }
 
+  function selectAnnotation(index) {
+    if (Number.isNaN(index) || index < 0 || index >= state.annotations.length) {
+      return;
+    }
+    cancelPendingBox();
+    cancelBoxDraw();
+    state.drawMode = false;
+    state.selectedAnnotationIndex = index;
+    renderAnnotationList();
+    renderAnnotationOverlay();
+    renderWorkerImageSummary();
+    renderButtons();
+  }
+
   function renderAnnotationList() {
     if (!state.annotations.length) {
       els.annotationList.innerHTML = '<div class="table-empty">아직 라벨링한 박스가 없습니다.</div>';
@@ -1545,7 +1602,8 @@
     }
     els.annotationList.innerHTML = state.annotations.map(function (annotation, index) {
       var color = labelColorForAnnotation(annotation);
-      return '<div class="annotation-row">' +
+      var selected = index === state.selectedAnnotationIndex;
+      return '<div class="annotation-row' + (selected ? " selected" : "") + '" data-select-annotation="' + escapeAttribute(index) + '">' +
         '<div><strong><i class="annotation-color-dot" style="--label-color: ' + escapeAttribute(color) + ';"></i>' + escapeHtml(index + 1 + ". " + annotation.label_name) + '</strong>' +
         '<span>' + escapeHtml("x " + percent(annotation.x) + ", y " + percent(annotation.y) + ", w " + percent(annotation.width) + ", h " + percent(annotation.height)) + '</span></div>' +
         '<button class="button danger compact" type="button" data-remove-annotation="' + escapeAttribute(index) + '">삭제</button>' +
@@ -1621,7 +1679,8 @@
     });
   }
 
-  async function setWorkerFolderMark(projectId, folderId, status) {
+  async function setWorkerFolderMark(projectId, folderId, status, options) {
+    var opts = options || {};
     if (state.busy) {
       return;
     }
@@ -1634,7 +1693,9 @@
         body: { project_id: projectId, folder_id: folderId, status: status }
       });
       await refreshWorker();
-      openFolderPicker();
+      if (opts.reopenPicker !== false) {
+        openFolderPicker();
+      }
       setStatus(folderMarkStatusText(status) + " 상태로 표시했습니다.", "ok");
     });
   }
@@ -2635,6 +2696,7 @@
     els.claimButton.disabled = state.busy || !assignedWorkerFolders().length;
     els.openFolderPickerButton.disabled = state.busy || !assignedWorkerFolders().length;
     els.closeFolderPickerButton.disabled = state.busy;
+    renderToolbarFolderMarkActions();
     Array.prototype.slice.call(els.assignedFolderList.querySelectorAll("[data-open-folder], [data-folder-mark]")).forEach(function (button) {
       button.disabled = state.busy;
     });

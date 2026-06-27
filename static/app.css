@@ -327,6 +327,11 @@ body.worker-mode .button.compact {
   gap: 6px;
 }
 
+.toolbar-folder-mark-select {
+  width: 108px;
+  height: 36px;
+}
+
 .folder-mark-actions .button.active {
   border-color: var(--primary);
   background: var(--primary);
@@ -363,6 +368,22 @@ body.worker-mode .button.compact {
   border-bottom: 1px solid var(--line);
 }
 
+.labeling-toolbar .toolbar {
+  flex-wrap: nowrap;
+  align-items: center;
+  overflow-x: auto;
+}
+
+.labeling-toolbar .toolbar .button,
+.labeling-toolbar .toolbar-folder-mark-select {
+  flex: 0 0 auto;
+}
+
+.labeling-toolbar .toolbar-folder-mark-select {
+  width: 92px;
+  min-width: 92px;
+}
+
 body.worker-mode .labeling-toolbar {
   gap: 8px;
   padding: 8px 10px;
@@ -396,6 +417,16 @@ body.worker-mode .labeling-toolbar {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fbfcfd;
+}
+
+.annotation-row {
+  cursor: pointer;
+}
+
+.annotation-row.selected {
+  border-color: var(--primary);
+  background: #eef6fd;
+  box-shadow: 0 0 0 3px rgba(23, 105, 170, 0.12);
 }
 
 .annotation-row div {
@@ -1471,5 +1502,15 @@ tr.current-row {
   .labeling-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .labeling-toolbar .toolbar {
+    display: flex;
+    flex-wrap: nowrap;
+  }
+
+  .labeling-toolbar .toolbar .button,
+  .labeling-toolbar .toolbar-folder-mark-select {
+    width: auto;
   }
 }
