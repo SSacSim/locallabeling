@@ -668,7 +668,8 @@ body.worker-mode .labeling-toolbar {
   white-space: nowrap;
 }
 
-.empty-state {
+.empty-state,
+.image-loading-state {
   display: grid;
   gap: 6px;
   place-items: center;
@@ -681,7 +682,12 @@ body.worker-mode .labeling-toolbar {
   text-align: center;
 }
 
-.empty-state strong {
+.image-loading-state {
+  border-style: solid;
+}
+
+.empty-state strong,
+.image-loading-state strong {
   color: var(--text);
 }
 

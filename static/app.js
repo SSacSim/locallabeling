@@ -3,9 +3,9 @@
 
   var TOKEN_KEY = "custom_labeling_token";
   var CLAIM_KEY = "custom_labeling_claim";
-  var IMAGE_PRELOAD_FORWARD_COUNT = 10;
-  var IMAGE_PRELOAD_BACKWARD_COUNT = 1;
-  var IMAGE_PRELOAD_CACHE_LIMIT = 16;
+  var IMAGE_PRELOAD_FORWARD_COUNT = 20;
+  var IMAGE_PRELOAD_BACKWARD_COUNT = 20;
+  var IMAGE_PRELOAD_CACHE_LIMIT = 45;
   var DEFAULT_LABEL_COLORS = [
     "#1f77b4",
     "#ff7f0e",
@@ -39,6 +39,7 @@
     boxInteraction: null,
     lastAnnotationClick: { index: -1, at: 0 },
     imageView: { scale: 1, offsetX: 0, offsetY: 0, panning: null },
+    imageLoad: { requestId: 0, imageReady: false, annotationsReady: false },
     activeFolder: { projectId: "", folderId: "" },
     startAtCheckpoint: false,
     initialCheckpointApplied: false,
@@ -77,7 +78,7 @@
       "loginPanel", "appPanel", "workerPanel", "loginUsernameInput", "loginPasswordInput", "loginButton", "loginMessage",
       "currentUserSummary", "logoutButton", "claimButton", "saveButton", "releaseButton", "refreshButton",
       "refreshImagesButton", "claimSummary", "projectSummary", "expiresSummary", "statusMessage", "checkpointSummary",
-      "emptyState", "imageStage", "claimedImage", "filenameSummary", "imageStatusSummary", "labelInput", "quickLabels",
+      "emptyState", "imageLoadingState", "imageStage", "claimedImage", "filenameSummary", "imageStatusSummary", "labelInput", "quickLabels",
       "notesInput", "statsGrid", "listSummary", "imageListBody", "prevImageButton", "nextImageButton",
       "drawBoxButton", "saveAnnotationsButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
       "cancelBoxLabelButton", "annotationList", "currentImageCounter",
@@ -137,6 +138,7 @@
       }
     });
     els.claimedImage.addEventListener("load", handleClaimedImageLoad);
+    els.claimedImage.addEventListener("error", handleClaimedImageError);
     els.imageStage.addEventListener("wheel", handleStageWheel, { passive: false });
     els.imageStage.addEventListener("pointerdown", beginBoxDraw);
     els.imageStage.addEventListener("pointermove", updateBoxDraw);
@@ -606,12 +608,14 @@
     var image = currentImage();
     if (!image) {
       state.annotations = [];
+      state.imageLoad = { requestId: state.annotationRequestId, imageReady: false, annotationsReady: false };
       clearImagePreloads();
       els.claimedImage.removeAttribute("src");
       els.claimedImage.hidden = true;
+      els.annotationOverlay.innerHTML = "";
+      els.imageLoadingState.hidden = true;
       els.emptyState.hidden = false;
       renderAnnotationList();
-      renderAnnotationOverlay();
       renderWorkerImageSummary();
       renderButtons();
       return;
@@ -619,11 +623,14 @@
 
     var requestId = state.annotationRequestId + 1;
     state.annotationRequestId = requestId;
+    state.imageLoad = { requestId: requestId, imageReady: false, annotationsReady: false };
+    setImageStageNotice(true, "이미지 로딩 중", "서버에서 이미지를 불러오고 있습니다.");
     els.claimedImage.fetchPriority = "high";
     els.claimedImage.decoding = "async";
     els.claimedImage.src = authenticatedImageUrl(image);
-    els.claimedImage.hidden = false;
-    els.emptyState.hidden = true;
+    if (els.claimedImage.complete && els.claimedImage.naturalWidth > 0) {
+      window.setTimeout(handleClaimedImageLoad, 0);
+    }
     renderWorkerImageSummary();
     renderBoxLabelOptions();
     try {
@@ -637,21 +644,70 @@
         state.images[state.currentImageIndex] = data.image;
       }
       await persistCurrentCheckpoint();
+      state.imageLoad.annotationsReady = true;
       renderWorkerImageSummary();
       renderAnnotationList();
-      renderAnnotationOverlay();
+      revealImageWhenReady(requestId);
       renderButtons();
     } catch (error) {
       state.annotations = [];
       renderAnnotationList();
-      renderAnnotationOverlay();
+      els.annotationOverlay.innerHTML = "";
+      setImageStageNotice(true, "어노테이션을 불러오지 못했습니다", error.message);
       setStatus(error.message, "error");
     }
   }
 
   function handleClaimedImageLoad() {
-    renderAnnotationOverlay();
+    if (state.imageLoad.requestId !== state.annotationRequestId) {
+      return;
+    }
+    state.imageLoad.imageReady = true;
+    revealImageWhenReady(state.imageLoad.requestId);
     scheduleNearbyImagePreload();
+  }
+
+  function handleClaimedImageError() {
+    if (state.imageLoad.requestId !== state.annotationRequestId) {
+      return;
+    }
+    state.imageLoad.imageReady = false;
+    state.imageLoad.annotationsReady = false;
+    els.claimedImage.hidden = true;
+    els.annotationOverlay.innerHTML = "";
+    setImageStageNotice(true, "이미지를 불러오지 못했습니다", "서버 이미지 응답을 확인하세요.");
+    setStatus("이미지를 불러오지 못했습니다.", "error");
+  }
+
+  function setImageStageNotice(visible, title, detail) {
+    els.imageLoadingState.hidden = !visible;
+    if (visible) {
+      var titleNode = els.imageLoadingState.querySelector("strong");
+      var detailNode = els.imageLoadingState.querySelector("span");
+      if (titleNode) {
+        titleNode.textContent = title || "이미지 로딩 중";
+      }
+      if (detailNode) {
+        detailNode.textContent = detail || "서버에서 이미지를 불러오고 있습니다.";
+      }
+    }
+    els.emptyState.hidden = true;
+    els.claimedImage.hidden = true;
+    els.annotationOverlay.innerHTML = "";
+  }
+
+  function revealImageWhenReady(requestId) {
+    if (requestId !== state.annotationRequestId) {
+      return;
+    }
+    if (!state.imageLoad.imageReady || !state.imageLoad.annotationsReady) {
+      return;
+    }
+    setImageStageNotice(false);
+    els.emptyState.hidden = true;
+    els.claimedImage.hidden = false;
+    renderAnnotationOverlay();
+    renderButtons();
   }
 
   function scheduleNearbyImagePreload() {
@@ -1528,7 +1584,7 @@
       return;
     }
     var imageRect = getRenderedImageRect();
-    if (!currentImage() || !imageRect) {
+    if (!currentImage() || !imageRect || !state.imageLoad.imageReady || !state.imageLoad.annotationsReady) {
       els.annotationOverlay.innerHTML = "";
       return;
     }
@@ -2192,12 +2248,14 @@
     els.filenameSummary.textContent = image ? image.relative_path || image.filename : "-";
     els.imageStatusSummary.textContent = image ? statusForImage(image) : "-";
     if (image) {
+      els.imageLoadingState.hidden = true;
       els.claimedImage.fetchPriority = "high";
       els.claimedImage.decoding = "async";
       els.claimedImage.src = authenticatedImageUrl(image);
       els.claimedImage.hidden = false;
       els.emptyState.hidden = true;
     } else {
+      els.imageLoadingState.hidden = true;
       els.claimedImage.removeAttribute("src");
       els.claimedImage.hidden = true;
       els.emptyState.hidden = false;
@@ -2692,6 +2750,7 @@
     var hasClaim = Boolean(state.claim && state.claim.claim_id);
     var isAdmin = state.user && state.user.role === "admin";
     var hasImage = Boolean(currentImage());
+    var hasLoadedImage = hasImage && state.imageLoad.imageReady && state.imageLoad.annotationsReady;
     [els.refreshButton, els.refreshImagesButton, els.logoutButton].forEach(disableIfBusy);
     els.claimButton.disabled = state.busy || !assignedWorkerFolders().length;
     els.openFolderPickerButton.disabled = state.busy || !assignedWorkerFolders().length;
@@ -2704,10 +2763,10 @@
     els.releaseButton.disabled = state.busy || !hasClaim;
     els.prevImageButton.disabled = state.busy || state.currentImageIndex <= 0;
     els.nextImageButton.disabled = state.busy || state.currentImageIndex < 0 || state.currentImageIndex >= state.images.length - 1;
-    els.drawBoxButton.disabled = state.busy || !hasImage;
+    els.drawBoxButton.disabled = state.busy || !hasLoadedImage;
     els.drawBoxButton.classList.toggle("active", state.drawMode);
     els.imageStage.classList.toggle("drawing", state.drawMode);
-    els.saveAnnotationsButton.disabled = state.busy || !hasImage || !state.annotationsDirty;
+    els.saveAnnotationsButton.disabled = state.busy || !hasLoadedImage || !state.annotationsDirty;
     if (isAdmin) {
       [
         els.adminRefreshButton, els.openProjectModalButton, els.createUserButton, els.createTempUserButton,
