@@ -4,9 +4,11 @@
   var TOKEN_KEY = "custom_labeling_token";
   var CLAIM_KEY = "custom_labeling_claim";
   var PASTE_MODE_KEY = "custom_labeling_paste_mode";
-  var IMAGE_PRELOAD_FORWARD_COUNT = 20;
-  var IMAGE_PRELOAD_BACKWARD_COUNT = 20;
+  var IMAGE_PRELOAD_FORWARD_COUNT = 10;
+  var IMAGE_PRELOAD_BACKWARD_COUNT = 10;
   var IMAGE_PRELOAD_CACHE_LIMIT = 45;
+  var IMAGE_MIN_SCALE = 1;
+  var IMAGE_MAX_SCALE = 8;
   var DEFAULT_LABEL_COLORS = [
     "#1f77b4",
     "#ff7f0e",
@@ -39,7 +41,7 @@
     editingAnnotationIndex: -1,
     boxInteraction: null,
     lastAnnotationClick: { index: -1, at: 0 },
-    imageView: { scale: 1, offsetX: 0, offsetY: 0, panning: null },
+    imageView: { scale: 1, offsetX: 0, offsetY: 0, panning: null, lastPointerX: null, lastPointerY: null },
     imageLoad: { requestId: 0, imageReady: false, annotationsReady: false },
     activeFolder: { projectId: "", folderId: "" },
     startAtCheckpoint: false,
@@ -84,7 +86,7 @@
       "refreshImagesButton", "claimSummary", "projectSummary", "expiresSummary", "statusMessage", "checkpointSummary",
       "emptyState", "imageLoadingState", "imageStage", "claimedImage", "filenameSummary", "imageStatusSummary", "labelInput", "quickLabels",
       "notesInput", "statsGrid", "listSummary", "imageListBody", "prevImageButton", "nextImageButton",
-      "drawBoxButton", "saveAnnotationsButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
+      "drawBoxButton", "saveAnnotationsButton", "deleteImageButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
       "cancelBoxLabelButton", "annotationList", "currentImageCounter", "replacePasteModeButton", "appendPasteModeButton",
       "workerKeyboardHint", "openFolderPickerButton", "toolbarFolderMarkSelect", "folderPickerModal", "closeFolderPickerButton",
       "assignedFolderList", "adminPanel", "adminRefreshButton",
@@ -92,7 +94,7 @@
       "adminProjectsView", "adminWorkersView", "adminAssignmentsView", "adminProgressView",
       "adminViewTitle", "adminViewDescription", "openProjectModalButton",
       "projectModal", "projectModalTitle", "projectModalDescription", "closeProjectModalButton", "cancelProjectModalButton", "projectNameInput",
-      "projectLabelsInput", "projectLabelNameInput", "projectLabelColorInput", "addProjectLabelButton", "projectLabelList",
+      "projectLabelsInput", "projectLabelNameInput", "projectLabelColorInput", "projectAllowDeleteInput", "addProjectLabelButton", "projectLabelList",
       "createProjectButton", "folderPathInput", "browseFolderPathButton",
       "folderUpButton", "selectCurrentFolderButton", "folderCurrentPath", "folderBrowserList", "selectedFolderList",
       "clearSelectedFoldersButton", "newUsernameInput", "newPasswordInput", "newRoleSelect",
@@ -132,6 +134,7 @@
     els.nextImageButton.addEventListener("click", function () { goToImage(state.currentImageIndex + 1); });
     els.drawBoxButton.addEventListener("click", toggleDrawMode);
     els.saveAnnotationsButton.addEventListener("click", saveAnnotations);
+    els.deleteImageButton.addEventListener("click", deleteCurrentImage);
     els.cancelBoxLabelButton.addEventListener("click", cancelPendingBox);
     els.boxLabelList.addEventListener("click", function (event) {
       var button = event.target.closest("[data-box-label-id]");
@@ -158,6 +161,12 @@
       });
     });
     els.progressProjectSelect.addEventListener("change", renderProgressView);
+    els.progressFolderBody.addEventListener("change", function (event) {
+      var markSelect = event.target.closest("[data-progress-folder-mark-select]");
+      if (markSelect) {
+        setAdminProgressFolderMark(markSelect.dataset.projectId, markSelect.dataset.folderId, markSelect.value);
+      }
+    });
     els.openProjectModalButton.addEventListener("click", openProjectModal);
     els.closeProjectModalButton.addEventListener("click", closeProjectModal);
     els.cancelProjectModalButton.addEventListener("click", closeProjectModal);
@@ -593,6 +602,20 @@
     return project && Array.isArray(project.labels) ? project.labels.map(normalizeProjectLabel).filter(function (label) { return label.name; }) : [];
   }
 
+  function projectAllowsWorkerDelete(project) {
+    return Boolean(project && project.allow_worker_delete);
+  }
+
+  function canDeleteImage(image) {
+    if (!image || !state.user || state.user.role === "admin") {
+      return false;
+    }
+    var project = (state.worker.projects || []).find(function (item) {
+      return item.id === image.project_id;
+    });
+    return projectAllowsWorkerDelete(project);
+  }
+
   async function goToImage(index) {
     if (!state.images.length) {
       return;
@@ -803,7 +826,7 @@
     if (els.checkpointSummary) {
       els.checkpointSummary.textContent = checkpointSummaryText();
     }
-    els.workerKeyboardHint.textContent = state.drawMode ? "박스를 드래그하세요. Esc 취소" : "A 이전, D 다음, W 박스 그리기";
+    els.workerKeyboardHint.textContent = state.drawMode ? "박스를 드래그하세요. Esc 취소" : "A 이전, D 다음, W 박스 그리기, F 확대/축소";
     renderToolbarFolderMarkActions();
   }
 
@@ -958,6 +981,9 @@
       return false;
     }
     state.drawMode = Boolean(enabled);
+    if (state.drawMode) {
+      state.selectedAnnotationIndex = -1;
+    }
     cancelPendingBox();
     cancelBoxDraw();
     renderWorkerImageSummary();
@@ -994,6 +1020,9 @@
     } else if (key === "w") {
       event.preventDefault();
       toggleDrawMode();
+    } else if (key === "f") {
+      event.preventDefault();
+      toggleStageMaxZoom();
     } else if (key === "escape") {
       cancelPendingBox();
       cancelBoxDraw();
@@ -1072,9 +1101,9 @@
       return;
     }
     var view = state.imageView;
-    view.scale = clamp(view.scale, 1, 8);
+    view.scale = clamp(view.scale, IMAGE_MIN_SCALE, IMAGE_MAX_SCALE);
     if (view.scale <= 1.001) {
-      view.scale = 1;
+      view.scale = IMAGE_MIN_SCALE;
       view.offsetX = 0;
       view.offsetY = 0;
       return;
@@ -1091,6 +1120,67 @@
     renderAnnotationOverlay();
   }
 
+  function stagePointerFromEvent(event) {
+    var stageRect = els.imageStage.getBoundingClientRect();
+    return {
+      x: clamp(event.clientX - stageRect.left, 0, stageRect.width),
+      y: clamp(event.clientY - stageRect.top, 0, stageRect.height)
+    };
+  }
+
+  function rememberStagePointer(event) {
+    var pointer = stagePointerFromEvent(event);
+    state.imageView.lastPointerX = pointer.x;
+    state.imageView.lastPointerY = pointer.y;
+    return pointer;
+  }
+
+  function stageZoomAnchor() {
+    var base = getBaseImageRect();
+    if (!base) {
+      return null;
+    }
+    var pointerX = Number(state.imageView.lastPointerX);
+    var pointerY = Number(state.imageView.lastPointerY);
+    return {
+      x: Number.isFinite(pointerX) ? clamp(pointerX, 0, base.stageWidth) : base.stageWidth / 2,
+      y: Number.isFinite(pointerY) ? clamp(pointerY, 0, base.stageHeight) : base.stageHeight / 2
+    };
+  }
+
+  function zoomImageViewAt(pointerX, pointerY, nextScale) {
+    var base = getBaseImageRect();
+    if (!base) {
+      return false;
+    }
+    var centerX = base.stageWidth / 2;
+    var centerY = base.stageHeight / 2;
+    var previousScale = state.imageView.scale || IMAGE_MIN_SCALE;
+    var targetScale = clamp(nextScale, IMAGE_MIN_SCALE, IMAGE_MAX_SCALE);
+    var relativeX = (pointerX - centerX - state.imageView.offsetX) / previousScale;
+    var relativeY = (pointerY - centerY - state.imageView.offsetY) / previousScale;
+    state.imageView.scale = targetScale;
+    state.imageView.offsetX = pointerX - centerX - relativeX * targetScale;
+    state.imageView.offsetY = pointerY - centerY - relativeY * targetScale;
+    clampImageView();
+    applyImageViewTransform();
+    renderAnnotationOverlay();
+    return true;
+  }
+
+  function toggleStageMaxZoom() {
+    if (!currentImage() || !getBaseImageRect()) {
+      return;
+    }
+    cancelPendingBox();
+    state.imageView.panning = null;
+    var anchor = stageZoomAnchor();
+    var nextScale = state.imageView.scale <= IMAGE_MIN_SCALE + 0.001 ? IMAGE_MAX_SCALE : IMAGE_MIN_SCALE;
+    if (anchor && zoomImageViewAt(anchor.x, anchor.y, nextScale)) {
+      renderButtons();
+    }
+  }
+
   function handleStageWheel(event) {
     if (!currentImage() || closestElement(event.target, ".box-label-picker")) {
       return;
@@ -1101,21 +1191,9 @@
     }
     event.preventDefault();
     cancelPendingBox();
-    var stageRect = els.imageStage.getBoundingClientRect();
-    var pointerX = event.clientX - stageRect.left;
-    var pointerY = event.clientY - stageRect.top;
-    var centerX = base.stageWidth / 2;
-    var centerY = base.stageHeight / 2;
+    var pointer = rememberStagePointer(event);
     var previousScale = state.imageView.scale;
-    var nextScale = clamp(previousScale * Math.exp(-event.deltaY * 0.0015), 1, 8);
-    var relativeX = (pointerX - centerX - state.imageView.offsetX) / previousScale;
-    var relativeY = (pointerY - centerY - state.imageView.offsetY) / previousScale;
-    state.imageView.scale = nextScale;
-    state.imageView.offsetX = pointerX - centerX - relativeX * nextScale;
-    state.imageView.offsetY = pointerY - centerY - relativeY * nextScale;
-    clampImageView();
-    applyImageViewTransform();
-    renderAnnotationOverlay();
+    zoomImageViewAt(pointer.x, pointer.y, previousScale * Math.exp(-event.deltaY * 0.0015));
   }
 
   function normalizedPointFromEvent(event) {
@@ -1136,12 +1214,13 @@
     if (!currentImage() || closestElement(event.target, ".box-label-picker")) {
       return;
     }
-    var annotationTarget = closestElement(event.target, "[data-annotation-index]");
-    if (annotationTarget) {
-      beginAnnotationInteraction(event, annotationTarget);
-      return;
-    }
+    rememberStagePointer(event);
     if (!state.drawMode) {
+      var annotationTarget = closestElement(event.target, "[data-annotation-index]");
+      if (annotationTarget) {
+        beginAnnotationInteraction(event, annotationTarget);
+        return;
+      }
       if (state.imageView.scale > 1.001) {
         beginImagePan(event);
         return;
@@ -1163,6 +1242,9 @@
   }
 
   function updateBoxDraw(event) {
+    if (currentImage() && !closestElement(event.target, ".box-label-picker")) {
+      rememberStagePointer(event);
+    }
     if (state.imageView.panning) {
       updateImagePan(event);
       return;
@@ -1809,6 +1891,60 @@
     return data;
   }
 
+  async function deleteCurrentImage() {
+    var image = currentImage();
+    if (!image) {
+      setStatus("삭제할 이미지가 없습니다.", "error");
+      return;
+    }
+    if (!canDeleteImage(image)) {
+      setStatus("이 프로젝트는 이미지 삭제가 허용되지 않았습니다.", "error");
+      return;
+    }
+    var message = "현재 이미지 파일과 연결된 라벨링 파일을 삭제합니다.\n삭제 후 되돌릴 수 없습니다.\n계속할까요?";
+    if (state.annotationsDirty) {
+      message += "\n\n저장하지 않은 박스 변경사항도 사라집니다.";
+    }
+    if (!window.confirm(message)) {
+      return;
+    }
+    var deletedIndex = state.currentImageIndex;
+    await runBusy("이미지 삭제 중", async function () {
+      var body = { image_id: image.id };
+      if (state.claim && state.claim.image && state.claim.image.id === image.id) {
+        body.claim_id = state.claim.claim_id;
+      }
+      await requestJson("/api/images/delete", { method: "POST", body: body });
+      if (state.claim && state.claim.image && state.claim.image.id === image.id) {
+        state.claim = null;
+        localStorage.removeItem(CLAIM_KEY);
+      }
+      removeDeletedImageLocally(image.id, deletedIndex);
+      await refreshWorker();
+      setStatus("이미지와 연결된 라벨링 파일을 삭제했습니다.", "ok");
+    });
+  }
+
+  function removeDeletedImageLocally(imageId, deletedIndex) {
+    clearImagePreloads();
+    cancelPendingBox();
+    cancelBoxDraw();
+    state.annotations = [];
+    state.annotationsDirty = false;
+    state.selectedAnnotationIndex = -1;
+    state.editingAnnotationIndex = -1;
+    state.allImages = state.allImages.filter(function (item) {
+      return item.id !== imageId;
+    });
+    state.images = imagesForActiveFolder(state.allImages);
+    state.currentImageIndex = state.images.length ? Math.min(deletedIndex, state.images.length - 1) : -1;
+    renderImages();
+    renderAnnotationList();
+    renderAnnotationOverlay();
+    renderWorkerImageSummary();
+    renderButtons();
+  }
+
   async function openWorkerFolder(projectId, folderId) {
     if (state.busy) {
       return;
@@ -1843,6 +1979,20 @@
       if (opts.reopenPicker !== false) {
         openFolderPicker();
       }
+      setStatus(folderMarkStatusText(status) + " 상태로 표시했습니다.", "ok");
+    });
+  }
+
+  async function setAdminProgressFolderMark(projectId, folderId, status) {
+    if (state.busy || !projectId || !folderId) {
+      return;
+    }
+    await runBusy("작업 상태 저장 중", async function () {
+      await requestJson("/api/worker/folder-mark", {
+        method: "POST",
+        body: { project_id: projectId, folder_id: folderId, status: status }
+      });
+      await refreshAdmin();
       setStatus(folderMarkStatusText(status) + " 상태로 표시했습니다.", "ok");
     });
   }
@@ -1963,6 +2113,7 @@
     if (els.projectLabelColorInput) {
       els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
     }
+    els.projectAllowDeleteInput.checked = false;
     state.folderBrowser.selectedFolders = [];
     els.projectModal.hidden = false;
     els.projectNameInput.focus();
@@ -1996,6 +2147,7 @@
     if (els.projectLabelColorInput) {
       els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
     }
+    els.projectAllowDeleteInput.checked = projectAllowsWorkerDelete(project);
     state.folderBrowser.selectedFolders = [];
     var existingPaths = selectedFolderPathsForProject(project);
     var primaryPath = existingPaths.length ? existingPaths[0] : "";
@@ -2180,6 +2332,7 @@
     var labels = serializeProjectLabels();
     var folderPaths = state.folderBrowser.selectedFolders.slice();
     var currentFolderPath = (state.folderBrowser.currentPath || els.folderPathInput.value || "").trim();
+    var allowWorkerDelete = Boolean(els.projectAllowDeleteInput.checked);
     var wasEditing = Boolean(state.editingProjectId);
     if (!folderPaths.length && currentFolderPath) {
       folderPaths.push(currentFolderPath);
@@ -2197,10 +2350,13 @@
       if (projectId) {
         await requestJson("/api/admin/projects/update", {
           method: "POST",
-          body: { project_id: projectId, name: name, labels: labels }
+          body: { project_id: projectId, name: name, labels: labels, allow_worker_delete: allowWorkerDelete }
         });
       } else {
-        var data = await requestJson("/api/admin/projects", { method: "POST", body: { name: name, labels: labels } });
+        var data = await requestJson("/api/admin/projects", {
+          method: "POST",
+          body: { name: name, labels: labels, allow_worker_delete: allowWorkerDelete }
+        });
         projectId = data.project && data.project.id;
       }
       var addedCount = 0;
@@ -2219,6 +2375,7 @@
       if (els.projectLabelColorInput) {
         els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
       }
+      els.projectAllowDeleteInput.checked = false;
       state.folderBrowser.selectedFolders = [];
       renderProjectLabelEditor();
       renderSelectedFolders();
@@ -2604,9 +2761,12 @@
     }
     els.projectList.innerHTML = projects.map(function (project) {
       var labels = renderProjectLabelSummary(project.labels || []);
+      var deletePolicyText = projectAllowsWorkerDelete(project) ? "작업자 허용" : "비활성";
       var summary = projectSummary(project);
       return '<section class="project-card">' +
-        '<div class="list-header"><div><div class="panel-title">' + escapeHtml(project.name) + '</div><div class="project-labels"><span class="muted">라벨:</span> ' + labels + '</div></div>' +
+        '<div class="list-header"><div><div class="panel-title">' + escapeHtml(project.name) + '</div>' +
+        '<div class="project-labels"><span class="muted">라벨:</span> ' + labels + '</div>' +
+        '<div class="project-labels"><span class="muted">삭제:</span> ' + escapeHtml(deletePolicyText) + '</div></div>' +
         '<div class="project-actions">' +
         '<button class="button secondary compact" data-edit-project="' + escapeAttribute(project.id) + '">프로젝트 수정</button>' +
         '<button class="button danger compact" data-remove-project="' + escapeAttribute(project.id) + '">프로젝트 삭제</button>' +
@@ -2638,18 +2798,16 @@
   function projectSummary(project) {
     var folders = project.folders || [];
     var totalImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
+    var progressedImages = folders.reduce(function (sum, folder) { return sum + folderProgressPosition(folder); }, 0);
     var availableImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.available) || 0); }, 0);
     var completedFolders = folders.filter(isFolderDone);
     var reviewFolders = folders.filter(isFolderReview);
-    var completedImages = completedFolders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
-    var reviewImages = reviewFolders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
     return {
       metrics: [
         { label: "YOLO 폴더", value: folders.length + "개" },
         { label: "완료 폴더", value: completedFolders.length + "/" + folders.length },
-        { label: "완료 이미지", value: completedImages + "/" + totalImages },
         { label: "검수 폴더", value: reviewFolders.length + "/" + folders.length },
-        { label: "검수 이미지", value: reviewImages + "/" + totalImages },
+        { label: "진행 이미지", value: progressedImages + "/" + totalImages },
         { label: "작업 가능", value: availableImages + "개" }
       ],
       assignments: projectAssignmentSummary(project)
@@ -2672,20 +2830,31 @@
     return folderMarkStatus(folder) === "review";
   }
 
-  function folderProgressText(folder) {
-    var status = folderMarkStatus(folder);
-    if (status === "done" || status === "review") {
-      return folderMarkStatusText(status);
+  function folderProgressPosition(folder) {
+    var total = Number(folder && folder.total) || 0;
+    if (!total) {
+      return 0;
     }
-    return folderCheckpointText(folder.checkpoint || {}, folder.total);
+    if (isFolderDone(folder) || isFolderReview(folder)) {
+      return total;
+    }
+    var checkpointPosition = Number(folder && folder.checkpoint && folder.checkpoint.position) || 0;
+    var labeledCount = Number(folder && folder.labeled) || 0;
+    return Math.min(total, Math.max(checkpointPosition, labeledCount));
+  }
+
+  function folderStatusSelectHtml(projectId, folder) {
+    var status = folderMarkStatus(folder) || "working";
+    var statuses = ["working", "done", "review"];
+    var options = statuses.map(function (item) {
+      return '<option value="' + escapeAttribute(item) + '"' + (status === item ? " selected" : "") + '>' + escapeHtml(folderMarkStatusText(item)) + '</option>';
+    }).join("");
+    return '<select class="text-input compact-select progress-status-select" data-progress-folder-mark-select="1" data-project-id="' + escapeAttribute(projectId) + '" data-folder-id="' + escapeAttribute(folder.id) + '">' + options + '</select>';
   }
 
   function folderProgressHtml(folder) {
-    var status = folderMarkStatus(folder);
-    if (status === "done" || status === "review") {
-      return '<span class="status-pill ' + escapeAttribute(status) + '">' + escapeHtml(folderMarkStatusText(status)) + '</span>';
-    }
-    return '<span class="muted">' + escapeHtml(folderProgressText(folder)) + '</span>';
+    var progress = folderCheckpointText(folder.checkpoint || {}, folder.total);
+    return '<span class="progress-count">' + escapeHtml(progress) + '</span>';
   }
 
   function projectAssignmentSummary(project) {
@@ -2717,7 +2886,7 @@
     var project = (state.admin.projects || []).find(function (item) { return item.id === projectId; });
     if (!project) {
       els.progressSummaryGrid.innerHTML = "";
-      els.progressFolderBody.innerHTML = '<tr><td colspan="5" class="table-empty">프로젝트를 선택하세요.</td></tr>';
+      els.progressFolderBody.innerHTML = '<tr><td colspan="6" class="table-empty">프로젝트를 선택하세요.</td></tr>';
       return;
     }
     var summary = projectSummary(project);
@@ -2727,7 +2896,7 @@
 
     var folders = project.folders || [];
     if (!folders.length) {
-      els.progressFolderBody.innerHTML = '<tr><td colspan="5" class="table-empty">등록된 YOLO 폴더가 없습니다.</td></tr>';
+      els.progressFolderBody.innerHTML = '<tr><td colspan="6" class="table-empty">등록된 YOLO 폴더가 없습니다.</td></tr>';
       return;
     }
     var folderAssignments = assignmentsByFolder(project);
@@ -2735,6 +2904,7 @@
       var assigned = folderAssignments[folder.id] || [];
       return "<tr>" +
         "<td><strong>" + escapeHtml(folder.name) + "</strong><div class=\"muted\">" + escapeHtml(folder.root_path || "") + "</div></td>" +
+        "<td>" + folderStatusSelectHtml(project.id, folder) + "</td>" +
         "<td>" + folderProgressHtml(folder) + "</td>" +
         "<td>" + escapeHtml(Number(folder.available) || 0) + "</td>" +
         "<td>" + escapeHtml(Number(folder.claimed) || 0) + "</td>" +
@@ -2840,7 +3010,8 @@
   function renderButtons() {
     var hasClaim = Boolean(state.claim && state.claim.claim_id);
     var isAdmin = state.user && state.user.role === "admin";
-    var hasImage = Boolean(currentImage());
+    var image = currentImage();
+    var hasImage = Boolean(image);
     var hasLoadedImage = hasImage && state.imageLoad.imageReady && state.imageLoad.annotationsReady;
     [els.refreshButton, els.refreshImagesButton, els.logoutButton].forEach(disableIfBusy);
     els.claimButton.disabled = state.busy || !assignedWorkerFolders().length;
@@ -2850,6 +3021,9 @@
     Array.prototype.slice.call(els.assignedFolderList.querySelectorAll("[data-open-folder], [data-folder-mark]")).forEach(function (button) {
       button.disabled = state.busy;
     });
+    Array.prototype.slice.call(els.progressFolderBody.querySelectorAll("[data-progress-folder-mark-select]")).forEach(function (select) {
+      select.disabled = state.busy;
+    });
     els.saveButton.disabled = state.busy || !hasClaim;
     els.releaseButton.disabled = state.busy || !hasClaim;
     els.prevImageButton.disabled = state.busy || state.currentImageIndex <= 0;
@@ -2858,11 +3032,12 @@
     els.drawBoxButton.classList.toggle("active", state.drawMode);
     els.imageStage.classList.toggle("drawing", state.drawMode);
     els.saveAnnotationsButton.disabled = state.busy || !hasLoadedImage || !state.annotationsDirty;
+    els.deleteImageButton.disabled = state.busy || !hasLoadedImage || !canDeleteImage(image);
     if (isAdmin) {
       [
         els.adminRefreshButton, els.openProjectModalButton, els.createUserButton, els.createTempUserButton,
         els.createProjectButton, els.addProjectLabelButton, els.saveAssignmentButton, els.browseFolderPathButton,
-        els.selectCurrentFolderButton, els.clearSelectedFoldersButton, els.closeProjectModalButton,
+        els.selectCurrentFolderButton, els.clearSelectedFoldersButton, els.projectAllowDeleteInput, els.closeProjectModalButton,
         els.cancelProjectModalButton
       ].forEach(disableIfBusy);
       els.folderUpButton.disabled = state.busy || !state.folderBrowser.parentPath;

@@ -88,6 +88,7 @@ class UserRemovePayload(BaseModel):
 class ProjectCreatePayload(BaseModel):
     name: str
     labels: list[str | dict] = []
+    allow_worker_delete: bool = False
 
 
 class ProjectRemovePayload(BaseModel):
@@ -98,6 +99,7 @@ class ProjectUpdatePayload(BaseModel):
     project_id: str
     name: str
     labels: list[str | dict]
+    allow_worker_delete: bool = False
 
 
 class ProjectLabelsPayload(BaseModel):
@@ -161,6 +163,11 @@ class AnnotationSavePayload(BaseModel):
     image_id: str
     claim_id: Optional[str] = ""
     annotations: list[AnnotationBox] = []
+
+
+class ImageDeletePayload(BaseModel):
+    image_id: str
+    claim_id: Optional[str] = ""
 
 
 class ReleasePayload(BaseModel):
@@ -269,6 +276,7 @@ def normalize_state(state: dict) -> dict:
             {
                 "id": project_id,
                 "name": name,
+                "allow_worker_delete": bool(project.get("allow_worker_delete")),
                 "labels": labels,
                 "folders": folders,
                 "assignments": assignments,
@@ -710,6 +718,16 @@ def sidecar_meta_path_for(folder: dict, rel_path: str) -> Path:
     return Path(folder["labels_path"]).resolve() / ".meta" / Path(meta_rel.as_posix())
 
 
+def unlink_existing_file(path: Path, code: str, message: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise ApiError(500, code, message) from exc
+    return True
+
+
 def image_cache_headers(path: Path) -> tuple[dict[str, str], os.stat_result]:
     stat_result = path.stat()
     etag = f'W/"{stat_result.st_mtime_ns:x}-{stat_result.st_size:x}"'
@@ -874,6 +892,7 @@ def public_project(project: dict, include_stats: bool = True) -> dict:
     return {
         "id": project["id"],
         "name": project["name"],
+        "allow_worker_delete": bool(project.get("allow_worker_delete")),
         "labels": project_labels_for_select(project),
         "folders": folders,
         "assignments": project["assignments"],
@@ -918,7 +937,7 @@ def worker_config(user: dict) -> dict:
                 if folder["id"] not in assigned:
                     continue
                 folder_data = folder_stats(project, folder)
-                folder_data["worker_mark"] = user_marks.get(folder["id"], {})
+                folder_data["worker_mark"] = folder_mark_summary(project, folder["id"]) or user_marks.get(folder["id"], {})
                 folder_data["worker_checkpoint"] = folder_checkpoint_summary(folder, folder_checkpoints.get(folder["id"]))
                 folders.append(folder_data)
             if folders:
@@ -926,6 +945,7 @@ def worker_config(user: dict) -> dict:
                     {
                         "id": project["id"],
                         "name": project["name"],
+                        "allow_worker_delete": bool(project.get("allow_worker_delete")),
                         "labels": project_labels_for_select(project),
                         "folders": folders,
                     }
@@ -1041,6 +1061,7 @@ def create_project(payload: ProjectCreatePayload) -> dict:
         project = {
             "id": "p_" + uuid.uuid4().hex[:12],
             "name": name,
+            "allow_worker_delete": bool(payload.allow_worker_delete),
             "labels": labels,
             "folders": [],
             "assignments": {},
@@ -1061,6 +1082,7 @@ def update_project(payload: ProjectUpdatePayload) -> dict:
         state = load_state()
         project = project_by_id(state, project_id)
         project["name"] = name
+        project["allow_worker_delete"] = bool(payload.allow_worker_delete)
         project["labels"] = labels
         write_classes_files(project)
         write_state(state)
@@ -1261,6 +1283,47 @@ def list_images_for_user(user: dict) -> dict:
             for image_path in image_files(folder)
         ]
     return {"images": images, "count": len(images)}
+
+
+def delete_image_for_user(payload: ImageDeletePayload, user: dict) -> dict:
+    image_id_value = require_non_empty(payload.image_id, "image_id")
+    with STATE_LOCK:
+        cleanup_expired_claims()
+        state = load_state()
+        project, folder, image_path, rel_path = image_context_for_user(state, image_id_value, user)
+        if user.get("role") != "admin" and not bool(project.get("allow_worker_delete")):
+            raise ApiError(403, "delete_not_allowed", "이 프로젝트는 작업자 이미지 삭제가 허용되지 않았습니다.")
+        active_claim = active_claim_for_image(project["id"], folder["id"], rel_path)
+        if active_claim and active_claim["username"] != user["username"] and user["role"] != "admin":
+            raise ApiError(409, "image_claimed", "다른 작업자가 선점한 이미지는 삭제할 수 없습니다.")
+        claim_id = str(payload.claim_id or "").strip()
+        if claim_id:
+            claim = CLAIMS.get(claim_id)
+            if claim and claim["image_id"] != image_id_value:
+                raise ApiError(409, "claim_image_mismatch", "선점한 이미지와 삭제 요청 이미지가 다릅니다.")
+            if claim and claim["username"] != user["username"] and user["role"] != "admin":
+                raise ApiError(403, "user_mismatch", "현재 로그인 사용자와 선점 사용자가 다릅니다.")
+        label_path = yolo_label_path_for(folder, rel_path)
+        meta_path = sidecar_meta_path_for(folder, rel_path)
+        deleted = {
+            "image": unlink_existing_file(image_path, "image_delete_failed", "이미지 파일을 삭제할 수 없습니다."),
+            "label": unlink_existing_file(label_path, "label_delete_failed", "라벨 파일을 삭제할 수 없습니다."),
+            "meta": unlink_existing_file(meta_path, "meta_delete_failed", "라벨 메타 파일을 삭제할 수 없습니다."),
+        }
+        for existing_claim_id, claim in list(CLAIMS.items()):
+            if claim["project_id"] == project["id"] and claim["folder_id"] == folder["id"] and claim["rel_path"] == rel_path:
+                CLAIMS.pop(existing_claim_id, None)
+        checkpoints = project.setdefault("folder_checkpoints", {})
+        checkpoint_removed = checkpoints.get(folder["id"], {}).get("rel_path") == rel_path
+        if checkpoint_removed:
+            checkpoints.pop(folder["id"], None)
+            write_state(state)
+    return {
+        "ok": True,
+        "image_id": image_id_value,
+        "deleted": deleted,
+        "checkpoint_removed": checkpoint_removed,
+    }
 
 
 def stats_for_user(user: dict) -> dict:
@@ -1692,6 +1755,11 @@ def api_stats(user: dict = Depends(current_user)) -> dict:
 @app.get("/api/images")
 def api_images(user: dict = Depends(current_user)) -> dict:
     return list_images_for_user(user)
+
+
+@app.post("/api/images/delete")
+def api_images_delete(payload: ImageDeletePayload, user: dict = Depends(current_user)) -> dict:
+    return delete_image_for_user(payload, user)
 
 
 @app.get("/api/annotations")

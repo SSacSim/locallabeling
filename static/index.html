@@ -46,7 +46,7 @@
               <div class="labeling-toolbar">
                 <div>
                   <div class="panel-title">이미지 라벨링</div>
-                  <div id="workerKeyboardHint" class="muted">A 이전, D 다음, W 박스 그리기</div>
+                  <div id="workerKeyboardHint" class="muted">A 이전, D 다음, W 박스 그리기, F 확대/축소</div>
                 </div>
                 <div class="toolbar" aria-label="이미지 이동 및 저장">
                   <button id="openFolderPickerButton" class="button secondary compact" type="button">작업 폴더 선택</button>
@@ -59,6 +59,7 @@
                   <button id="nextImageButton" class="button secondary compact" type="button">다음</button>
                   <button id="drawBoxButton" class="button primary compact" type="button">박스 그리기</button>
                   <button id="saveAnnotationsButton" class="button success compact" type="button" disabled>저장</button>
+                  <button id="deleteImageButton" class="button danger compact" type="button" disabled>삭제</button>
                 </div>
               </div>
 
@@ -191,14 +192,15 @@
                     <thead>
                       <tr>
                         <th scope="col">YOLO 폴더</th>
-                        <th scope="col">상태/진행</th>
+                        <th scope="col">상태</th>
+                        <th scope="col">진행</th>
                         <th scope="col">가능</th>
                         <th scope="col">작업 중</th>
                         <th scope="col">할당</th>
                       </tr>
                     </thead>
                     <tbody id="progressFolderBody">
-                      <tr><td colspan="5" class="table-empty">프로젝트를 선택하세요.</td></tr>
+                      <tr><td colspan="6" class="table-empty">프로젝트를 선택하세요.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -301,6 +303,10 @@
                   <div id="projectLabelList" class="label-editor-list"></div>
                   <textarea id="projectLabelsInput" hidden></textarea>
                 </div>
+                <label class="check-row">
+                  <input id="projectAllowDeleteInput" type="checkbox">
+                  <span><strong>작업자 이미지 삭제 허용</strong></span>
+                </label>
               </section>
 
               <section class="modal-section">

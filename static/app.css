@@ -347,6 +347,17 @@ body.worker-mode .button.compact {
   background: var(--primary-dark);
 }
 
+.progress-status-select {
+  width: 112px;
+  height: 36px;
+}
+
+.progress-count {
+  color: var(--text);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .labeling-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;
@@ -659,6 +670,11 @@ body.worker-mode .labeling-toolbar {
 .annotation-handle-ne,
 .annotation-handle-sw {
   cursor: nesw-resize;
+}
+
+.labeling-stage.drawing .annotation-box:not(.annotation-box-draft),
+.labeling-stage.drawing .annotation-handle {
+  cursor: crosshair;
 }
 
 .box-label-picker {
@@ -1317,15 +1333,15 @@ body.worker-mode .image-meta {
 
 .project-summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
-  gap: 10px;
-  padding: 14px 16px 16px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px 14px 14px;
 }
 
 .progress-summary-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
   margin: 14px 0;
 }
 
@@ -1333,7 +1349,7 @@ body.worker-mode .image-meta {
   display: grid;
   gap: 4px;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fbfcfd;
@@ -1353,6 +1369,10 @@ body.worker-mode .image-meta {
 
 .summary-metric.wide {
   grid-column: 1 / -1;
+}
+
+.project-summary-grid .summary-metric.wide {
+  grid-column: auto;
 }
 
 .assignment-chip {
