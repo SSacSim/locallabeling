@@ -101,11 +101,21 @@
 
             <aside class="annotation-panel" aria-label="라벨링 목록">
               <div class="annotation-panel-header">
-                <div>
-                  <div class="panel-title">라벨링 목록</div>
-                  <div id="currentImageCounter" class="muted">-</div>
+                <div class="panel-title">라벨링 목록</div>
+                <div id="currentImageCounter" class="image-jump-counter">
+                  <input
+                    id="imageJumpInput"
+                    class="text-input image-jump-input"
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    autocomplete="off"
+                    aria-label="이동할 이미지 번호"
+                    title="이미지 번호 입력 후 Enter"
+                  >
+                  <span aria-hidden="true">/</span>
+                  <span id="currentImageTotal">-</span>
                 </div>
-                <button id="firstImageButton" class="button secondary compact" type="button" title="첫 이미지로 이동">처음</button>
               </div>
               <div class="annotation-actions">
                 <div class="annotation-copy-mode" role="group" aria-label="Ctrl+V 복사 모드">

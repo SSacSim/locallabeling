@@ -85,9 +85,9 @@
       "currentUserSummary", "logoutButton", "claimButton", "saveButton", "releaseButton", "refreshButton",
       "refreshImagesButton", "claimSummary", "projectSummary", "expiresSummary", "statusMessage", "checkpointSummary",
       "emptyState", "imageLoadingState", "imageStage", "claimedImage", "filenameSummary", "imageStatusSummary", "labelInput", "quickLabels",
-      "notesInput", "statsGrid", "listSummary", "imageListBody", "firstImageButton", "prevImageButton", "nextImageButton",
+      "notesInput", "statsGrid", "listSummary", "imageListBody", "imageJumpInput", "prevImageButton", "nextImageButton",
       "drawBoxButton", "saveAnnotationsButton", "deleteImageButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
-      "cancelBoxLabelButton", "annotationList", "currentImageCounter", "replacePasteModeButton", "appendPasteModeButton",
+      "cancelBoxLabelButton", "annotationList", "currentImageCounter", "currentImageTotal", "replacePasteModeButton", "appendPasteModeButton",
       "workerKeyboardHint", "openFolderPickerButton", "toolbarFolderMarkSelect", "folderPickerModal", "closeFolderPickerButton",
       "assignedFolderList", "adminPanel", "adminRefreshButton",
       "adminProjectsTab", "adminWorkersTab", "adminAssignmentsTab", "adminProgressTab",
@@ -130,7 +130,15 @@
     els.releaseButton.addEventListener("click", releaseClaim);
     els.refreshButton.addEventListener("click", refreshAll);
     els.refreshImagesButton.addEventListener("click", refreshImages);
-    els.firstImageButton.addEventListener("click", function () { goToImage(0); });
+    els.imageJumpInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitImageJump();
+      }
+    });
+    els.imageJumpInput.addEventListener("input", function () {
+      els.imageJumpInput.value = els.imageJumpInput.value.replace(/[^\d]/g, "");
+    });
     els.prevImageButton.addEventListener("click", function () { goToImage(state.currentImageIndex - 1); });
     els.nextImageButton.addEventListener("click", function () { goToImage(state.currentImageIndex + 1); });
     els.drawBoxButton.addEventListener("click", toggleDrawMode);
@@ -295,7 +303,9 @@
       }
       var row = event.target.closest("[data-select-annotation]");
       if (row) {
-        selectAnnotation(parseInt(row.dataset.selectAnnotation, 10));
+        var index = parseInt(row.dataset.selectAnnotation, 10);
+        selectAnnotation(index);
+        toggleAnnotationCopyEnabled(index);
       }
     });
     els.annotationList.addEventListener("change", function (event) {
@@ -617,6 +627,34 @@
     return projectAllowsWorkerDelete(project);
   }
 
+  function resetImageJumpInput() {
+    els.imageJumpInput.value = "";
+  }
+
+  function commitImageJump() {
+    if (!state.images.length) {
+      resetImageJumpInput();
+      return;
+    }
+    var rawValue = els.imageJumpInput.value.trim();
+    if (!rawValue) {
+      return;
+    }
+    var targetNumber = Number(rawValue);
+    if (!Number.isFinite(targetNumber) || targetNumber % 1 !== 0) {
+      resetImageJumpInput();
+      setStatus("이동할 이미지 번호는 정수로 입력하세요.", "error");
+      return;
+    }
+    if (targetNumber < 1 || targetNumber > state.images.length) {
+      resetImageJumpInput();
+      setStatus("이미지 번호는 1부터 " + state.images.length + "까지 입력하세요.", "error");
+      return;
+    }
+    resetImageJumpInput();
+    goToImage(targetNumber - 1);
+  }
+
   async function goToImage(index) {
     if (!state.images.length) {
       return;
@@ -823,7 +861,10 @@
     els.filenameSummary.textContent = image ? image.relative_path || image.filename : "-";
     els.projectSummary.textContent = image ? image.project_name + " / " + image.folder_name : "-";
     els.imageStatusSummary.textContent = image ? statusForImage(image) : "-";
-    els.currentImageCounter.textContent = total ? (state.currentImageIndex + 1) + " / " + total : "배정 이미지 없음";
+    els.currentImageTotal.textContent = total ? String(total) : "0";
+    if (!total || document.activeElement !== els.imageJumpInput) {
+      resetImageJumpInput();
+    }
     if (els.checkpointSummary) {
       els.checkpointSummary.textContent = checkpointSummaryText();
     }
@@ -1700,6 +1741,13 @@
     renderAnnotationList();
   }
 
+  function toggleAnnotationCopyEnabled(index) {
+    if (Number.isNaN(index) || index < 0 || index >= state.annotations.length) {
+      return;
+    }
+    setAnnotationCopyEnabled(index, !annotationCopyEnabled(state.annotations[index]));
+  }
+
   function setAllAnnotationCopyEnabled(enabled) {
     state.annotations.forEach(function (annotation) {
       annotation.copy_enabled = Boolean(enabled);
@@ -1827,7 +1875,7 @@
     els.annotationList.innerHTML = state.annotations.map(function (annotation, index) {
       var color = labelColorForAnnotation(annotation);
       var selected = index === state.selectedAnnotationIndex;
-      return '<div class="annotation-row' + (selected ? " selected" : "") + '" data-select-annotation="' + escapeAttribute(index) + '">' +
+      return '<div class="annotation-row' + (selected ? " selected" : "") + '" data-select-annotation="' + escapeAttribute(index) + '" title="클릭하여 Ctrl+V 복사 대상 선택/해제">' +
         '<label class="annotation-copy-check" title="Ctrl+V 복사 대상">' +
         '<input type="checkbox" data-copy-annotation="' + escapeAttribute(index) + '"' + (annotationCopyEnabled(annotation) ? " checked" : "") + ' aria-label="' + escapeAttribute(index + 1 + "번 복사 대상") + '">' +
         '</label>' +
@@ -3027,7 +3075,7 @@
     });
     els.saveButton.disabled = state.busy || !hasClaim;
     els.releaseButton.disabled = state.busy || !hasClaim;
-    els.firstImageButton.disabled = state.busy || state.currentImageIndex <= 0;
+    els.imageJumpInput.disabled = state.busy || !state.images.length;
     els.prevImageButton.disabled = state.busy || state.currentImageIndex <= 0;
     els.nextImageButton.disabled = state.busy || state.currentImageIndex < 0 || state.currentImageIndex >= state.images.length - 1;
     els.drawBoxButton.disabled = state.busy || !hasLoadedImage;
