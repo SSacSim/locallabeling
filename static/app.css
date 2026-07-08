@@ -412,6 +412,17 @@ body.worker-mode .labeling-toolbar {
   padding: 16px;
 }
 
+.annotation-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.annotation-panel-header .button {
+  flex: 0 0 auto;
+}
+
 .annotation-actions {
   display: grid;
   gap: 8px;

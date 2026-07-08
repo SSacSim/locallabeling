@@ -85,7 +85,7 @@
       "currentUserSummary", "logoutButton", "claimButton", "saveButton", "releaseButton", "refreshButton",
       "refreshImagesButton", "claimSummary", "projectSummary", "expiresSummary", "statusMessage", "checkpointSummary",
       "emptyState", "imageLoadingState", "imageStage", "claimedImage", "filenameSummary", "imageStatusSummary", "labelInput", "quickLabels",
-      "notesInput", "statsGrid", "listSummary", "imageListBody", "prevImageButton", "nextImageButton",
+      "notesInput", "statsGrid", "listSummary", "imageListBody", "firstImageButton", "prevImageButton", "nextImageButton",
       "drawBoxButton", "saveAnnotationsButton", "deleteImageButton", "annotationOverlay", "boxLabelPicker", "boxLabelList",
       "cancelBoxLabelButton", "annotationList", "currentImageCounter", "replacePasteModeButton", "appendPasteModeButton",
       "workerKeyboardHint", "openFolderPickerButton", "toolbarFolderMarkSelect", "folderPickerModal", "closeFolderPickerButton",
@@ -130,6 +130,7 @@
     els.releaseButton.addEventListener("click", releaseClaim);
     els.refreshButton.addEventListener("click", refreshAll);
     els.refreshImagesButton.addEventListener("click", refreshImages);
+    els.firstImageButton.addEventListener("click", function () { goToImage(0); });
     els.prevImageButton.addEventListener("click", function () { goToImage(state.currentImageIndex - 1); });
     els.nextImageButton.addEventListener("click", function () { goToImage(state.currentImageIndex + 1); });
     els.drawBoxButton.addEventListener("click", toggleDrawMode);
@@ -3026,6 +3027,7 @@
     });
     els.saveButton.disabled = state.busy || !hasClaim;
     els.releaseButton.disabled = state.busy || !hasClaim;
+    els.firstImageButton.disabled = state.busy || state.currentImageIndex <= 0;
     els.prevImageButton.disabled = state.busy || state.currentImageIndex <= 0;
     els.nextImageButton.disabled = state.busy || state.currentImageIndex < 0 || state.currentImageIndex >= state.images.length - 1;
     els.drawBoxButton.disabled = state.busy || !hasLoadedImage;
