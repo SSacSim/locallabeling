@@ -1028,6 +1028,23 @@ body.worker-mode .image-meta {
   color: var(--success-dark);
 }
 
+.status-pill.extracting {
+  border-color: #e4c58d;
+  background: #fff4dc;
+  color: var(--warning-dark);
+}
+
+.project-extraction {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.label-warning,
+.annotation-row .label-warning {
+  color: var(--warning-dark);
+  font-weight: 600;
+}
+
 .status-pill.review {
   border-color: #b9d6ef;
   background: #e8f2fb;
@@ -1093,6 +1110,27 @@ body.worker-mode .image-meta {
   display: grid;
   gap: 12px;
 }
+
+.extraction-dialog {
+  width: min(720px, calc(100% - 24px));
+  margin: auto;
+  padding: 0;
+  color: var(--text);
+}
+
+.extraction-dialog:not([open]) { display: none; }
+.extraction-dialog::backdrop { background: rgba(20, 28, 34, 0.42); }
+.extraction-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+.extraction-path-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.extraction-path-row .text-input { flex: 1 1 180px; }
+.extraction-settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 12px; }
+.extraction-videos { max-height: 190px; overflow-y: auto; }
+.extraction-dialog .folder-list { max-height: 160px; overflow-y: auto; }
+.extraction-dialog .folder-open { width: 100%; padding: 6px 8px; border-radius: 4px; overflow-wrap: anywhere; }
+.extraction-dialog .folder-open:hover { background: var(--surface-strong); }
+#extractionBrowsePath, #extractionStatus, #extractionMessage { overflow-wrap: anywhere; }
+#extractionStatus:empty, #extractionMessage:empty { display: none; }
+#extractionMessage { color: var(--danger); }
 
 .icon-button {
   width: 38px;

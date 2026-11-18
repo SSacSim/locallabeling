@@ -19,12 +19,15 @@ from typing import Optional
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from pseudo_labeling import LabelTarget, cuda_device_count, predict_images
+from video_extraction import STAGING_PREFIX, VIDEO_EXTENSIONS, extract_videos
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,6 +59,9 @@ STATE_LOCK = threading.Lock()
 SESSIONS: dict[str, dict] = {}
 CLAIMS: dict[str, dict] = {}
 CLAIM_COUNTS = {"released": 0, "completed": 0, "expired": 0}
+EXTRACTION_LOCK = threading.Lock()
+EXTRACTIONS: dict[str, dict] = {}
+PSEUDO_JOBS: dict[str, dict] = {}  # Access under STATE_LOCK.
 
 
 class ApiError(Exception):
@@ -96,11 +102,27 @@ class ProjectRemovePayload(BaseModel):
     project_id: str
 
 
+class ExtractionPayload(BaseModel):
+    name: str | None = None
+    labels: list[str | dict] = Field(default_factory=list)
+    source_path: str
+    videos: list[str]
+    output_path: str
+    fps: float = Field(gt=0, allow_inf_nan=False)
+    max_images: int = Field(gt=0, strict=True)
+
+
 class ProjectUpdatePayload(BaseModel):
     project_id: str
     name: str
     labels: list[str | dict]
     allow_worker_delete: bool = False
+
+
+class PseudoLabelPayload(BaseModel):
+    model_path: str
+    gpu_count: int = Field(ge=0, strict=True)
+    batch_size: int = Field(gt=0, strict=True)
 
 
 class ProjectLabelsPayload(BaseModel):
@@ -153,7 +175,8 @@ class LabelPayload(BaseModel):
 
 
 class AnnotationBox(BaseModel):
-    label_id: int
+    label_id: int = Field(ge=0)
+    model_label_name: str | None = None
     x: float
     y: float
     width: float
@@ -283,6 +306,8 @@ def normalize_state(state: dict) -> dict:
                 "assignments": assignments,
                 "folder_marks": folder_marks,
                 "folder_checkpoints": folder_checkpoints,
+                **({"extraction": project["extraction"]} if isinstance(project.get("extraction"), dict) else {}),
+                **({"pseudo_labeling": project["pseudo_labeling"]} if isinstance(project.get("pseudo_labeling"), dict) else {}),
                 "created_at": str(project.get("created_at") or utc_iso()),
             }
         )
@@ -551,6 +576,8 @@ def resolve_server_path(raw_path: str) -> Path:
 
 def discover_yolo_roots(path: Path) -> list[Path]:
     roots = []
+    if any(part.startswith(STAGING_PREFIX) for part in path.parts):
+        return roots
     if is_yolo_root(path):
         roots.append(path)
         return roots
@@ -563,6 +590,8 @@ def discover_yolo_roots(path: Path) -> list[Path]:
     seen = set()
     while pending:
         current, depth = pending.pop(0)
+        if current.name.startswith(STAGING_PREFIX):
+            continue
         try:
             resolved = current.resolve()
         except OSError:
@@ -614,7 +643,7 @@ def direct_yolo_child_exists(path: Path) -> bool:
     return False
 
 
-def browse_server_folders(raw_path: str = "") -> dict:
+def browse_server_folders(raw_path: str = "", include_yolo_info: bool = True) -> dict:
     if raw_path and raw_path.strip():
         current = resolve_server_path(raw_path)
         if not current.is_dir():
@@ -641,8 +670,8 @@ def browse_server_folders(raw_path: str = "") -> dict:
                 {
                     "name": child.name or str(resolved),
                     "path": str(resolved),
-                    "is_yolo_root": is_yolo_root(resolved),
-                    "has_yolo_children": direct_yolo_child_exists(resolved),
+                    "is_yolo_root": include_yolo_info and is_yolo_root(resolved),
+                    "has_yolo_children": include_yolo_info and direct_yolo_child_exists(resolved),
                 }
             )
         except OSError:
@@ -897,6 +926,14 @@ def folder_mark_summary(project: dict, folder_id: str) -> dict:
     return latest or {}
 
 
+def running_extraction(project_id: str) -> dict | None:
+    with EXTRACTION_LOCK:
+        for job in EXTRACTIONS.values():
+            if job["project_id"] == project_id and job["status"] == "running":
+                return dict(job)
+    return None
+
+
 def public_project(project: dict, claimed_paths: dict[str, set[str]] | None) -> dict:
     folders = []
     folder_checkpoints = project.get("folder_checkpoints", {})
@@ -906,7 +943,7 @@ def public_project(project: dict, claimed_paths: dict[str, set[str]] | None) -> 
         )
         folder_data["mark"] = folder_mark_summary(project, folder["id"])
         folders.append(folder_data)
-    return {
+    data = {
         "id": project["id"],
         "name": project["name"],
         "allow_worker_delete": bool(project.get("allow_worker_delete")),
@@ -915,6 +952,14 @@ def public_project(project: dict, claimed_paths: dict[str, set[str]] | None) -> 
         "assignments": project["assignments"],
         "created_at": project["created_at"],
     }
+    if "extraction" in project:
+        extraction = project["extraction"]
+        if extraction.get("status") == "running":
+            extraction = running_extraction(project["id"]) or extraction
+        data["extraction"] = dict(extraction)
+    if "pseudo_labeling" in project:
+        data["pseudo_labeling"] = dict(project["pseudo_labeling"])
+    return data
 
 
 def assigned_pairs_for_user(state: dict, username: str, role: str) -> list[tuple[dict, dict]]:
@@ -933,6 +978,9 @@ def assigned_pairs_for_user(state: dict, username: str, role: str) -> list[tuple
 def admin_config(include_stats: bool = True) -> dict:
     with STATE_LOCK:
         state = load_state()
+        for project in state["projects"]:
+            if project["id"] in PSEUDO_JOBS:
+                project["pseudo_labeling"] = dict(PSEUDO_JOBS[project["id"]])
         if include_stats:
             cleanup_expired_claims()
         projects = [
@@ -1082,25 +1130,37 @@ def remove_user(payload: UserRemovePayload) -> dict:
     return {"ok": True, "username": username}
 
 
+def new_project(name: str, labels: list, allow_worker_delete: bool = False) -> dict:
+    return {
+        "id": "p_" + uuid.uuid4().hex[:12],
+        "name": require_non_empty(name, "name"),
+        "allow_worker_delete": allow_worker_delete,
+        "labels": normalize_labels(labels or DEFAULT_LABELS),
+        "folders": [],
+        "assignments": {},
+        "folder_marks": {},
+        "folder_checkpoints": {},
+        "created_at": utc_iso(),
+    }
+
+
 def create_project(payload: ProjectCreatePayload) -> dict:
-    name = require_non_empty(payload.name, "name")
-    labels = normalize_labels(payload.labels or DEFAULT_LABELS)
+    project = new_project(payload.name, payload.labels, payload.allow_worker_delete)
     with STATE_LOCK:
         state = load_state()
-        project = {
-            "id": "p_" + uuid.uuid4().hex[:12],
-            "name": name,
-            "allow_worker_delete": bool(payload.allow_worker_delete),
-            "labels": labels,
-            "folders": [],
-            "assignments": {},
-            "folder_marks": {},
-            "folder_checkpoints": {},
-            "created_at": utc_iso(),
-        }
         state["projects"].append(project)
         write_state(state)
         return {"ok": True, "project": public_project(project, {})}
+
+
+def require_pseudo_idle(project_id: str) -> None:
+    if PSEUDO_JOBS.get(project_id, {}).get("status") == "running":
+        raise ApiError(409, "pseudo_labeling_running", "자동 라벨링이 끝난 뒤 다시 시도하세요.")
+
+
+def check_label_change(project: dict, labels: list[dict]) -> None:
+    if [label["name"] for label in project["labels"]] != [label["name"] for label in labels]:
+        require_pseudo_idle(project["id"])
 
 
 def update_project(payload: ProjectUpdatePayload) -> dict:
@@ -1110,6 +1170,7 @@ def update_project(payload: ProjectUpdatePayload) -> dict:
     with STATE_LOCK:
         state = load_state()
         project = project_by_id(state, project_id)
+        check_label_change(project, labels)
         project["name"] = name
         project["allow_worker_delete"] = bool(payload.allow_worker_delete)
         project["labels"] = labels
@@ -1122,7 +1183,10 @@ def remove_project(payload: ProjectRemovePayload) -> dict:
     project_id = require_non_empty(payload.project_id, "project_id")
     with STATE_LOCK:
         state = load_state()
-        project_by_id(state, project_id)
+        project = project_by_id(state, project_id)
+        if project.get("extraction", {}).get("status") == "running":
+            raise ApiError(409, "extraction_running", "추출이 끝난 뒤 프로젝트를 삭제할 수 있습니다.")
+        require_pseudo_idle(project_id)
         state["projects"] = [project for project in state["projects"] if project["id"] != project_id]
         for claim_id, claim in list(CLAIMS.items()):
             if claim["project_id"] == project_id:
@@ -1137,10 +1201,23 @@ def update_project_labels(payload: ProjectLabelsPayload) -> dict:
     with STATE_LOCK:
         state = load_state()
         project = project_by_id(state, project_id)
+        check_label_change(project, labels)
         project["labels"] = labels
         write_classes_files(project)
         write_state(state)
         return {"ok": True, "project": public_project(project, claimed_paths_by_folder(project_id))}
+
+
+def project_folder(root: Path, source: Path) -> dict:
+    return {
+        "id": "f_" + uuid.uuid4().hex[:12],
+        "name": root.name,
+        "root_path": str(root.resolve()),
+        "images_path": str((root / "images").resolve()),
+        "labels_path": str((root / "labels").resolve()),
+        "source_path": str(source),
+        "created_at": utc_iso(),
+    }
 
 
 def add_yolo_folders(payload: YoloFolderPayload) -> dict:
@@ -1151,7 +1228,6 @@ def add_yolo_folders(payload: YoloFolderPayload) -> dict:
     roots = discover_yolo_roots(root)
     if not roots:
         raise ApiError(400, "not_yolo_folder", "images 폴더를 가진 YOLO 폴더를 찾지 못했습니다.")
-    source_path = str(root.resolve())
 
     with STATE_LOCK:
         state = load_state()
@@ -1167,15 +1243,7 @@ def add_yolo_folders(payload: YoloFolderPayload) -> dict:
                 raise ApiError(403, "labels_folder_create_failed", "labels 폴더를 생성할 수 없습니다.") from exc
             if resolved in existing_roots:
                 continue
-            folder = {
-                "id": "f_" + uuid.uuid4().hex[:12],
-                "name": yolo_root.name,
-                "root_path": resolved,
-                "images_path": str((yolo_root / "images").resolve()),
-                "labels_path": str(labels_path),
-                "source_path": source_path,
-                "created_at": utc_iso(),
-            }
+            folder = project_folder(yolo_root, root)
             project["folders"].append(folder)
             added.append(folder_stats(folder, set()))
         write_classes_files(project)
@@ -1189,6 +1257,7 @@ def remove_yolo_folder(payload: FolderRemovePayload) -> dict:
     with STATE_LOCK:
         state = load_state()
         project = project_by_id(state, project_id)
+        require_pseudo_idle(project_id)
         folder_by_id(project, folder_id)
         project["folders"] = [folder for folder in project["folders"] if folder["id"] != folder_id]
         for username in list(project["assignments"].keys()):
@@ -1292,14 +1361,19 @@ def set_project_assignments(payload: AssignmentBulkPayload) -> dict:
     return {"ok": True, "username": username, "project_id": project_id, "folder_ids": requested_ids}
 
 
-def write_classes_files(project: dict) -> None:
-    content = "\n".join(label["name"] for label in project["labels"]) + "\n"
+def classes_file_content(labels: list[dict]) -> str:
+    return "\n".join(label["name"] for label in labels) + "\n"
+
+
+def write_classes_files(project: dict, *, strict: bool = False) -> None:
+    content = classes_file_content(project["labels"])
     for folder in project["folders"]:
         root = Path(folder["root_path"])
         try:
             (root / "classes.txt").write_text(content, encoding="utf-8", newline="\n")
         except OSError:
-            continue
+            if strict:
+                raise
 
 
 def list_images_for_user(user: dict) -> dict:
@@ -1493,8 +1567,17 @@ def write_yolo_label(path: Path, label_id: int) -> None:
     os.replace(tmp_path, path)
 
 
-def validated_annotation(project: dict, box: AnnotationBox) -> dict:
-    label = label_by_id(project, box.label_id)
+def annotation_label(labels: dict, label_id: int, model_name: str | None) -> dict:
+    project_label = labels.get(label_id, {})
+    return {
+        "label_id": label_id,
+        "label_name": model_name if model_name is not None else project_label.get("name", f"클래스 #{label_id}"),
+        "label_color": normalize_label_color(project_label.get("color"), label_id),
+        **({"model_label_name": model_name} if model_name is not None else {}),
+    }
+
+
+def validated_annotation(labels: dict, box: AnnotationBox) -> dict:
     values = {
         "x": float(box.x),
         "y": float(box.y),
@@ -1504,35 +1587,41 @@ def validated_annotation(project: dict, box: AnnotationBox) -> dict:
     if values["width"] <= 0 or values["height"] <= 0:
         raise ApiError(400, "invalid_box", "박스 크기는 0보다 커야 합니다.")
     for key, value in values.items():
-        if value < 0 or value > 1:
+        if not 0 <= value <= 1:
             raise ApiError(400, "invalid_box", "박스 좌표는 0과 1 사이여야 합니다.")
     return {
-        "label_id": int(label["id"]),
-        "label_name": label["name"],
-        "label_color": normalize_label_color(label.get("color"), int(label["id"])),
+        **annotation_label(labels, box.label_id, box.model_label_name),
         **values,
     }
 
 
-def read_yolo_annotations(path: Path, project: dict) -> list[dict]:
+def read_model_sources(meta_path: Path) -> dict:
+    if not meta_path.is_file():
+        return {}
+    return json.loads(meta_path.read_text(encoding="utf-8")).get("model_sources", {})
+
+
+def read_yolo_annotations(path: Path, project: dict, meta_path: Path) -> list[dict]:
     if not path.is_file():
         return []
+    content = path.read_bytes()
+    names = read_model_sources(meta_path).get(hashlib.sha256(content).hexdigest(), {})
+    labels = {label["id"]: label for label in project["labels"]}
     annotations = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for index, line in enumerate(content.decode("utf-8").splitlines()):
         parts = line.split()
         if len(parts) < 5:
             continue
         try:
             label_id = int(float(parts[0]))
-            label = label_by_id(project, label_id)
+            if label_id < 0:
+                continue
             x, y, width, height = [float(value) for value in parts[1:5]]
-        except (ValueError, ApiError):
+        except (ValueError, OverflowError):
             continue
         annotations.append(
             {
-                "label_id": int(label["id"]),
-                "label_name": label["name"],
-                "label_color": normalize_label_color(label.get("color"), int(label["id"])),
+                **annotation_label(labels, label_id, names.get(str(index))),
                 "x": x,
                 "y": y,
                 "width": width,
@@ -1542,15 +1631,52 @@ def read_yolo_annotations(path: Path, project: dict) -> list[dict]:
     return annotations
 
 
-def write_yolo_annotations(path: Path, annotations: list[dict]) -> None:
+def write_yolo_annotations(
+    path: Path, annotations: list[dict], meta_path: Path, metadata: dict, *, overwrite: bool = True,
+) -> bool:
+    if not overwrite and path.exists():
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     lines = [
         f"{item['label_id']} {item['x']:.6f} {item['y']:.6f} {item['width']:.6f} {item['height']:.6f}"
         for item in annotations
     ]
-    tmp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n")
-    os.replace(tmp_path, path)
+    content = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+    # Publish the line-by-line names before the TXT. Keep the previous generation
+    # readable if the server stops between the two atomic replacements.
+    sources = {}
+    if overwrite and path.is_file():
+        previous_sources = read_model_sources(meta_path)
+        if previous_sources:
+            previous = hashlib.sha256(path.read_bytes()).hexdigest()
+            if previous in previous_sources:
+                sources[previous] = previous_sources[previous]
+    names = {
+        str(i): box["model_label_name"] for i, box in enumerate(annotations)
+        if box.get("model_label_name") is not None
+    }
+    digest = hashlib.sha256(content).hexdigest()
+    if names:
+        sources[digest] = names
+    else:
+        sources.pop(digest, None)
+    try:
+        tmp_path.write_bytes(content)
+        write_label_meta(meta_path, {**metadata, **({"model_sources": sources} if sources else {})})
+        if overwrite:
+            os.replace(tmp_path, path)
+        elif os.name == "nt":
+            os.rename(tmp_path, path)  # Windows rename refuses an existing destination.
+        else:
+            os.link(tmp_path, path)
+        return True
+    except FileExistsError:
+        if overwrite:
+            raise
+        return False
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def annotations_for_image(image_id_value: str, user: dict) -> dict:
@@ -1558,7 +1684,7 @@ def annotations_for_image(image_id_value: str, user: dict) -> dict:
         state = load_state()
         project, folder, image_path, rel_path = image_context_for_user(state, image_id_value, user)
         label_path = yolo_label_path_for(folder, rel_path)
-        annotations = read_yolo_annotations(label_path, project)
+        annotations = read_yolo_annotations(label_path, project, sidecar_meta_path_for(folder, rel_path))
         return {
             "image_id": image_id_value,
             "image": image_to_dict(project, folder, image_path),
@@ -1581,23 +1707,29 @@ def save_annotations(payload: AnnotationSavePayload, user: dict) -> dict:
                 raise ApiError(409, "claim_image_mismatch", "선점한 이미지와 저장 요청 이미지가 다릅니다.")
             if claim["username"] != user["username"] and user["role"] != "admin":
                 raise ApiError(403, "user_mismatch", "현재 로그인 사용자와 선점 사용자가 다릅니다.")
-        annotations = [validated_annotation(project, box) for box in payload.annotations]
         label_path = yolo_label_path_for(folder, rel_path)
-        write_yolo_annotations(label_path, annotations)
-        write_label_meta(
-            sidecar_meta_path_for(folder, rel_path),
-            {
-                "image_id": payload.image_id,
-                "project_id": project["id"],
-                "project_name": project["name"],
-                "folder_id": folder["id"],
-                "folder_name": folder["name"],
-                "image_path": str(image_path),
-                "annotations": annotations,
-                "username": user["username"],
-                "created_at": now_text,
-            },
-        )
+        meta_path = sidecar_meta_path_for(folder, rel_path)
+        labels = {label["id"]: label for label in project["labels"]}
+        unknown_ids = {
+            box.label_id for box in payload.annotations
+            if box.model_label_name is None and box.label_id not in labels
+        }
+        if unknown_ids:
+            existing_ids = {box["label_id"] for box in read_yolo_annotations(label_path, project, meta_path)}
+            if not unknown_ids <= existing_ids:
+                raise ApiError(400, "invalid_label", "프로젝트 라벨 목록에 없는 라벨입니다.")
+        annotations = [validated_annotation(labels, box) for box in payload.annotations]
+        write_yolo_annotations(label_path, annotations, meta_path, {
+            "image_id": payload.image_id,
+            "project_id": project["id"],
+            "project_name": project["name"],
+            "folder_id": folder["id"],
+            "folder_name": folder["name"],
+            "image_path": str(image_path),
+            "annotations": annotations,
+            "username": user["username"],
+            "created_at": now_text,
+        })
         if claim_id:
             CLAIMS.pop(claim_id, None)
             CLAIM_COUNTS["completed"] += 1
@@ -1657,6 +1789,19 @@ async def handle_validation_error(_: Request, exc: RequestValidationError) -> JS
 @app.on_event("startup")
 def startup() -> None:
     ensure_storage()
+    state = load_state()
+    interrupted = False
+    for project in state["projects"]:
+        pseudo = project.get("pseudo_labeling", {})
+        if pseudo.get("status") == "running":
+            pseudo.update(status="failed", error="서버가 재시작되어 중단되었습니다. 다시 실행하면 이미 저장된 라벨은 건너뜁니다.")
+            interrupted = True
+    if interrupted:
+        write_state(state)
+    for project in state["projects"]:
+        job = project.get("extraction", {})
+        if job.get("status") == "running":
+            finish_extraction(job, recovering=True)
 
 
 @app.get("/")
@@ -1705,9 +1850,252 @@ def api_admin_project_progress(project_id: str, _: dict = Depends(require_admin)
     return public_project(project, claimed_paths)
 
 
+def gpu_capacity() -> int:
+    try:
+        return cuda_device_count()
+    except (ImportError, OSError, RuntimeError) as exc:
+        raise ApiError(503, "torch_unavailable", f"서버의 PyTorch 환경을 확인하세요. {exc}") from exc
+
+
+def free_gpu_ids(count: int) -> list[int]:
+    reserved = {gpu for job in PSEUDO_JOBS.values() if job["status"] == "running" for gpu in job["gpu_ids"]}
+    return [index for index in range(count) if index not in reserved]
+
+
+@app.get("/api/admin/pseudo-labeling/devices")
+def api_pseudo_devices(_: dict = Depends(require_admin)) -> dict:
+    count = gpu_capacity()
+    with STATE_LOCK:
+        return {"gpu_count": count, "available": len(free_gpu_ids(count))}
+
+
+def run_pseudo_job(project: dict, job: dict) -> None:
+    project_id = project["id"]
+    folders = {folder["id"]: folder for folder in project["folders"]}
+
+    def save(target: LabelTarget, annotations: list[dict]) -> None:
+        with STATE_LOCK:
+            cleanup_expired_claims()
+            if (target.label.exists() or not target.image.is_file()
+                    or active_claim_for_image(project_id, target.folder_id, target.relative_path)):
+                job["skipped"] += 1
+            elif not annotations:
+                job["empty"] += 1
+            else:
+                meta_path = sidecar_meta_path_for(folders[target.folder_id], target.relative_path)
+                if write_yolo_annotations(target.label, annotations, meta_path, {}, overwrite=False):
+                    job["written"] += 1
+                    job["boxes"] += len(annotations)
+                    detected = dict(job["detected_classes"])
+                    for box in annotations:
+                        detected[str(box["label_id"])] = box["model_label_name"]
+                    job["detected_classes"] = detected
+                else:
+                    job["skipped"] += 1
+            job["processed"] += 1
+
+    error = ""
+    try:
+        with STATE_LOCK:
+            cleanup_expired_claims()
+            claims = claimed_paths_by_folder(project_id)
+        targets = []
+        total = 0
+        for folder in project["folders"]:
+            if not Path(folder["images_path"]).is_dir():
+                raise ValueError(f"이미지 폴더를 찾을 수 없습니다. {folder['images_path']}")
+            files = image_files(folder)
+            total += len(files)
+            claimed = claims.get(folder["id"], set())
+            for path in files:
+                rel = image_rel_path(folder, path)
+                label_path = yolo_label_path_for(folder, rel)
+                if rel not in claimed and not label_path.exists():
+                    targets.append(LabelTarget(folder["id"], rel, path, label_path))
+        with STATE_LOCK:
+            job.update(total=total, processed=total - len(targets), skipped=total - len(targets))
+        if targets:
+            predict_images(job["model_path"], targets, job["gpu_ids"], job["batch_size"], save)
+    except Exception as exc:
+        error = str(exc) or type(exc).__name__
+
+    with STATE_LOCK:
+        job.update(status="failed" if error else "done", error=error)
+        try:
+            state = load_state()
+            project_by_id(state, project_id)["pseudo_labeling"] = dict(job)
+            write_state(state)
+        except OSError as exc:
+            job.update(status="failed", error=f"작업 상태를 저장하지 못했습니다. {exc}")
+        else:
+            PSEUDO_JOBS.pop(project_id)
+
+
+@app.post("/api/admin/projects/{project_id}/pseudo-labeling", status_code=202)
+def api_start_pseudo(
+    project_id: str, payload: PseudoLabelPayload, tasks: BackgroundTasks, _: dict = Depends(require_admin)
+) -> dict:
+    path = resolve_server_path(payload.model_path)
+    if path.suffix.lower() != ".pt" or not path.is_file():
+        raise ApiError(400, "invalid_model", "서버에 있는 Ultralytics 객체 탐지 모델(.pt) 파일을 지정하세요.")
+    count = gpu_capacity()
+    if payload.gpu_count > count:
+        raise ApiError(400, "invalid_gpu_count", f"서버에서 인식한 CUDA GPU는 {count}개입니다.")
+    with STATE_LOCK:
+        state = load_state()
+        project = project_by_id(state, project_id)
+        require_pseudo_idle(project_id)
+        if project.get("extraction", {}).get("status") == "running" or not project["folders"]:
+            raise ApiError(409, "images_not_ready", "추출이 완료된 이미지 폴더가 필요합니다.")
+        devices = free_gpu_ids(count)[:payload.gpu_count]
+        if len(devices) < payload.gpu_count:
+            raise ApiError(409, "gpu_busy", "요청한 수만큼 사용 가능한 GPU가 없습니다.")
+        job = {
+            "status": "running", "model_path": str(path), "gpu_count": payload.gpu_count,
+            "gpu_ids": devices, "batch_size": payload.batch_size, "total": None,
+            "processed": 0, "written": 0, "skipped": 0, "empty": 0, "boxes": 0, "detected_classes": {},
+        }
+        project["pseudo_labeling"] = dict(job)
+        write_state(state)
+        PSEUDO_JOBS[project_id] = job
+    tasks.add_task(run_pseudo_job, project, job)
+    return {"project": public_project(project, None)}
+
+
+@app.get("/api/admin/projects/{project_id}/pseudo-labeling")
+def api_pseudo_status(project_id: str, _: dict = Depends(require_admin)) -> dict:
+    with STATE_LOCK:
+        job = PSEUDO_JOBS.get(project_id)
+        if job and job["status"] == "running":
+            return {"pseudo_labeling": dict(job)}
+        project = project_by_id(load_state(), project_id)
+        if job:
+            project["pseudo_labeling"] = dict(job)
+    return {"project": public_project(project, None)}
+
+
 @app.get("/api/admin/folders/browse")
-def api_admin_folders_browse(path: str = Query(default=""), _: dict = Depends(require_admin)) -> dict:
-    return browse_server_folders(path)
+def api_admin_folders_browse(
+    path: str = Query(default=""), include_yolo_info: bool = True, _: dict = Depends(require_admin)
+) -> dict:
+    return browse_server_folders(path, include_yolo_info)
+
+
+def videos_in_folder(source: Path) -> list[str]:
+    if not source.is_dir():
+        raise ApiError(400, "folder_not_found", "영상 폴더를 찾을 수 없습니다.")
+    try:
+        videos = [
+            item.name for item in source.iterdir()
+            if item.suffix.lower() in VIDEO_EXTENSIONS and item.is_file() and item.resolve().parent == source
+        ]
+        return sorted(videos, key=str.casefold)
+    except OSError as exc:
+        raise ApiError(403, "folder_access_denied", "영상 폴더를 읽을 수 없습니다.") from exc
+
+
+@app.get("/api/admin/extraction/videos")
+def api_extraction_videos(path: str, _: dict = Depends(require_admin)) -> dict:
+    source = resolve_server_path(path)
+    return {"path": str(source), "videos": videos_in_folder(source)}
+
+
+@app.get("/api/admin/extraction")
+def api_extraction_status(user: dict = Depends(require_admin)) -> dict:
+    with EXTRACTION_LOCK:
+        return dict(EXTRACTIONS.get(user["username"], {"status": "idle"}))
+
+
+@app.get("/api/admin/projects/{project_id}/extraction")
+def api_project_extraction(project_id: str, _: dict = Depends(require_admin)) -> dict:
+    live = running_extraction(project_id)
+    if live:
+        return {"extraction": live}
+    with STATE_LOCK:
+        project = project_by_id(load_state(), project_id)
+    return {"project": public_project(project, None)}
+
+
+def finish_extraction(job: dict, error: str = "", *, written_classes: str | None = None, recovering: bool = False) -> None:
+    result = dict(job)
+    output = Path(result["output_path"])
+    folders = []
+    if not error:
+        try:
+            if recovering and not output.is_dir():
+                raise ValueError("서버가 재시작되어 이미지 추출이 중단되었습니다.")
+            roots = sorted(path for path in output.iterdir() if is_yolo_root(path))
+            if not roots or (not recovering and len(roots) != result["folders"]):
+                raise ValueError("추출 결과 폴더를 모두 찾을 수 없습니다.")
+            folders = [project_folder(root, output) for root in roots]
+            if recovering:
+                result["images"] = sum(1 for root in roots for _ in (root / "images").glob("*.jpg"))
+                result["folders"] = len(folders)
+        except (ValueError, OSError) as exc:
+            error = str(exc)
+
+    with STATE_LOCK:
+        state = load_state()
+        project = project_by_id(state, result["project_id"])
+        if not error:
+            try:
+                if written_classes != classes_file_content(project["labels"]):
+                    write_classes_files({"labels": project["labels"], "folders": folders}, strict=True)
+                existing = {folder["root_path"] for folder in project["folders"]}
+                project["folders"].extend(folder for folder in folders if folder["root_path"] not in existing)
+            except OSError as exc:
+                error = f"라벨 목록을 저장할 수 없습니다. {exc}"
+        result["status"] = "failed" if error else "done"
+        if error:
+            result["error"] = error
+        project["extraction"] = result
+        write_state(state)
+        with EXTRACTION_LOCK:
+            job.update(result)
+
+
+def run_extraction(job: dict, videos: list[Path], payload: ExtractionPayload, classes_text: str) -> None:
+    def progress(video: str, images: int, folders: int) -> None:
+        with EXTRACTION_LOCK:
+            job.update(video=video, images=images, folders=folders)
+
+    try:
+        extract_videos(videos, Path(job["output_path"]), payload.fps, payload.max_images, progress, classes_text)
+    except Exception as exc:
+        finish_extraction(job, str(exc) or "영상에서 이미지를 추출하지 못했습니다.")
+    else:
+        finish_extraction(job, written_classes=classes_text)
+
+
+@app.post("/api/admin/extraction", status_code=202)
+def api_start_extraction(
+    payload: ExtractionPayload, tasks: BackgroundTasks, user: dict = Depends(require_admin)
+) -> dict:
+    source = resolve_server_path(payload.source_path)
+    output = resolve_server_path(payload.output_path)
+    selected = list(dict.fromkeys(payload.videos))
+    if not selected or not set(selected).issubset(videos_in_folder(source)):
+        raise ApiError(400, "invalid_video", "영상 목록을 다시 불러온 뒤 추출할 파일을 선택하세요.")
+    if output.exists() and not output.is_dir():
+        raise ApiError(400, "invalid_output", "저장 경로에 폴더를 지정하세요.")
+    username = user["username"]
+    project = new_project(payload.name if payload.name is not None else Path(selected[0]).stem, payload.labels)
+    destination = output / f"extract_{datetime.now():%Y%m%d_%H%M%S}_{project['id'][2:]}"
+    with STATE_LOCK, EXTRACTION_LOCK:
+        if EXTRACTIONS.get(username, {}).get("status") == "running":
+            raise ApiError(409, "extraction_running", "이미 이미지 추출이 진행 중입니다.")
+        job = {
+            "project_id": project["id"], "status": "running", "video": selected[0],
+            "images": 0, "folders": 0, "output_path": str(destination),
+        }
+        project["extraction"] = dict(job)
+        state = load_state()
+        state["projects"].append(project)
+        write_state(state)
+        EXTRACTIONS[username] = job
+        initial = dict(job)
+    tasks.add_task(run_extraction, job, [source / name for name in selected], payload, classes_file_content(project["labels"]))
+    return {**initial, "project": public_project(project, None)}
 
 
 @app.post("/api/admin/users", status_code=201)

@@ -181,6 +181,7 @@
                 <div id="adminViewDescription" class="muted">프로젝트 목록과 접근 폴더를 관리합니다.</div>
               </div>
               <div class="button-row">
+                <button id="openExtractionButton" class="button secondary compact" type="button">이미지 추출</button>
                 <button id="openProjectModalButton" class="button primary compact" type="button">프로젝트 생성</button>
                 <button id="adminRefreshButton" class="button secondary compact" type="button">새로고침</button>
               </div>
@@ -290,6 +291,100 @@
           </section>
         </section>
 
+        <dialog id="pseudoDialog" class="modal-card extraction-dialog" aria-labelledby="pseudoTitle">
+          <div class="modal-header">
+            <div id="pseudoTitle" class="panel-title">자동 라벨링</div>
+            <button id="closePseudoButton" class="icon-button" type="button" aria-label="닫기">×</button>
+          </div>
+          <form id="pseudoForm" class="modal-body">
+            <label class="field-block" for="pseudoModel"><span class="field-label">Ultralytics 객체 탐지 모델 (.pt)</span>
+              <input id="pseudoModel" class="text-input" type="text" placeholder="서버의 모델 파일 경로" required>
+            </label>
+            <div class="extraction-settings">
+              <label class="field-block"><span class="field-label">사용할 GPU 수</span>
+                <select id="pseudoGpus" class="text-input"></select>
+              </label>
+              <label class="field-block"><span class="field-label">장치당 배치 크기</span>
+                <input id="pseudoBatch" class="text-input" type="number" min="1" step="1" value="8" required>
+              </label>
+            </div>
+            <div class="muted">라벨이 없고 선점되지 않은 이미지에 실행합니다. 모든 탐지 박스를 모델의 클래스 번호로 저장합니다. 같은 번호의 프로젝트 라벨과 이름이 다르면 경고가 표시됩니다.</div>
+            <div id="pseudoMessage" class="muted" role="status"></div>
+          </form>
+          <div class="modal-footer">
+            <button id="startPseudoButton" class="button primary" form="pseudoForm" type="submit">자동 라벨링 시작</button>
+          </div>
+        </dialog>
+
+        <dialog id="extractionDialog" class="modal-card extraction-dialog" aria-labelledby="extractionTitle">
+          <div class="modal-header">
+            <div id="extractionTitle" class="panel-title">이미지 추출</div>
+            <button id="closeExtractionButton" class="icon-button" type="button" aria-label="닫기">×</button>
+          </div>
+          <form id="extractionForm" class="modal-body">
+            <fieldset id="extractionFields" class="modal-section extraction-fields">
+              <label class="field-block" for="extractionProjectName">
+                <span class="field-label">프로젝트 이름</span>
+                <input id="extractionProjectName" class="text-input" type="text" autocomplete="off" required>
+              </label>
+              <div id="extractionLabelEditor" class="field-block">
+                <span class="field-label">라벨 목록</span>
+                <div class="client-row">
+                  <select class="text-input label-source" aria-label="라벨을 가져올 프로젝트"></select>
+                  <button class="button secondary compact import-labels" type="button" title="편집 중인 라벨 목록을 선택한 프로젝트의 라벨로 교체합니다." disabled>라벨 가져오기</button>
+                </div>
+                <div class="label-add-row">
+                  <input class="text-input" type="text" autocomplete="off" placeholder="라벨 이름" aria-label="라벨 이름">
+                  <input class="label-color-input" type="color" aria-label="라벨 색상">
+                  <button class="button secondary compact" type="button" aria-label="라벨 추가">+</button>
+                </div>
+                <div class="label-editor-list"></div>
+              </div>
+              <label class="field-label" for="extractionSource">영상 폴더</label>
+              <div class="extraction-path-row">
+                <input id="extractionSource" class="text-input" type="text" autocomplete="off" placeholder="서버의 영상 폴더 경로" required>
+                <button class="button secondary compact" type="button" data-extraction-browse="source">찾아보기</button>
+                <button id="listVideosButton" class="button secondary compact" type="button">영상 불러오기</button>
+              </div>
+              <div class="section-header">
+                <span class="field-label">추출할 영상</span>
+                <label><input id="selectAllVideos" type="checkbox" disabled> 전체 선택</label>
+              </div>
+              <div id="extractionVideos" class="checklist extraction-videos">영상 폴더를 선택하세요.</div>
+              <label class="field-label" for="extractionOutput">저장 폴더</label>
+              <div class="extraction-path-row">
+                <input id="extractionOutput" class="text-input" type="text" autocomplete="off" placeholder="기존 폴더 또는 새 폴더 경로" required>
+                <button class="button secondary compact" type="button" data-extraction-browse="output">찾아보기</button>
+              </div>
+              <section id="extractionBrowser" class="folder-browser" aria-label="서버 폴더 탐색" hidden>
+                <div class="section-header">
+                  <strong id="extractionBrowsePath"></strong>
+                  <div class="button-row">
+                    <button id="extractionUp" class="button secondary compact" type="button">상위</button>
+                    <button id="extractionChoose" class="button primary compact" type="button">현재 폴더 선택</button>
+                    <button id="extractionBrowseClose" class="button secondary compact" type="button">접기</button>
+                  </div>
+                </div>
+                <div id="extractionDirectories" class="folder-list"></div>
+              </section>
+              <div class="extraction-settings">
+                <label class="field-block"><span class="field-label">추출 FPS (초당 이미지 수)</span>
+                  <input id="extractionFps" class="text-input" type="number" value="1" min="0" step="any" required>
+                </label>
+                <label class="field-block"><span class="field-label">폴더당 최대 이미지 수</span>
+                  <input id="extractionLimit" class="text-input" type="number" value="1000" min="1" step="1" required>
+                </label>
+              </div>
+              <div class="muted">영상별로 폴더를 나누고 각 폴더에 images와 labels를 만듭니다.</div>
+            </fieldset>
+            <div id="extractionMessage" class="muted" role="alert"></div>
+            <div id="extractionStatus" class="muted" role="status"></div>
+          </form>
+          <div class="modal-footer">
+            <button id="startExtractionButton" class="button primary" form="extractionForm" type="submit">추출 시작</button>
+          </div>
+        </dialog>
+
         <section id="projectModal" class="modal-layer" aria-label="프로젝트 생성" role="dialog" aria-modal="true" hidden>
           <div class="modal-card">
             <div class="modal-header">
@@ -306,15 +401,18 @@
                   <span class="field-label">프로젝트 이름</span>
                   <input id="projectNameInput" class="text-input" type="text" autocomplete="off" placeholder="프로젝트 이름">
                 </label>
-                <div class="field-block">
+                <div id="projectLabelEditor" class="field-block">
                   <span class="field-label">라벨 목록</span>
+                  <div class="client-row">
+                    <select class="text-input label-source" aria-label="라벨을 가져올 프로젝트"></select>
+                    <button class="button secondary compact import-labels" type="button" title="편집 중인 라벨 목록을 선택한 프로젝트의 라벨로 교체합니다." disabled>라벨 가져오기</button>
+                  </div>
                   <div class="label-add-row">
                     <input id="projectLabelNameInput" class="text-input" type="text" autocomplete="off" placeholder="라벨 이름">
                     <input id="projectLabelColorInput" class="label-color-input" type="color" value="#d62728" aria-label="라벨 색상">
                     <button id="addProjectLabelButton" class="button secondary compact" type="button" aria-label="라벨 추가">+</button>
                   </div>
                   <div id="projectLabelList" class="label-editor-list"></div>
-                  <textarea id="projectLabelsInput" hidden></textarea>
                 </div>
                 <label class="check-row">
                   <input id="projectAllowDeleteInput" type="checkbox">

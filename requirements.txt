@@ -1,2 +1,5 @@
 fastapi
 uvicorn
+imageio-ffmpeg>=0.6
+torch>=2.6
+ultralytics>=8.4.215,<9

@@ -57,17 +57,24 @@
     adminActiveTab: "projects",
     adminConfigRequestId: 0,
     editingProjectId: "",
-    projectLabels: defaultProjectLabels(),
     folderBrowser: { currentPath: "", parentPath: "", entries: [], selectedFolders: [] },
     busy: false
   };
 
   var els = {};
+  var projectLabelEditor;
+  var extractionLabelEditor;
 
   document.addEventListener("DOMContentLoaded", init);
 
   function init() {
     bindElements();
+    projectLabelEditor = createLabelEditor(document.getElementById("projectLabelEditor"), function (message) {
+      setStatus(message, "error");
+    });
+    extractionLabelEditor = createLabelEditor(document.getElementById("extractionLabelEditor"), function (message) {
+      document.getElementById("extractionMessage").textContent = message;
+    });
     attachEvents();
     state.annotationPasteMode = getStoredAnnotationPasteMode();
     renderAnnotationPasteMode();
@@ -93,9 +100,11 @@
       "assignedFolderList", "adminPanel", "adminRefreshButton",
       "adminProjectsTab", "adminWorkersTab", "adminAssignmentsTab", "adminProgressTab",
       "adminProjectsView", "adminWorkersView", "adminAssignmentsView", "adminProgressView",
-      "adminViewTitle", "adminViewDescription", "openProjectModalButton",
+      "adminViewTitle", "adminViewDescription", "openProjectModalButton", "openExtractionButton",
+      "pseudoDialog", "pseudoTitle", "pseudoForm", "pseudoModel", "pseudoGpus", "pseudoBatch",
+      "pseudoMessage", "startPseudoButton", "closePseudoButton",
       "projectModal", "projectModalTitle", "projectModalDescription", "closeProjectModalButton", "cancelProjectModalButton", "projectNameInput",
-      "projectLabelsInput", "projectLabelNameInput", "projectLabelColorInput", "projectAllowDeleteInput", "addProjectLabelButton", "projectLabelList",
+      "projectAllowDeleteInput", "addProjectLabelButton",
       "createProjectButton", "folderPathInput", "browseFolderPathButton",
       "folderUpButton", "selectCurrentFolderButton", "folderCurrentPath", "folderBrowserList", "selectedFolderList",
       "clearSelectedFoldersButton", "newUsernameInput", "newPasswordInput", "newRoleSelect",
@@ -179,7 +188,22 @@
         setAdminProgressFolderMark(markSelect.dataset.projectId, markSelect.dataset.folderId, markSelect.value);
       }
     });
+    els.openExtractionButton.addEventListener("click", async function () {
+      try {
+        var dialog = await import("./extraction.js");
+        if (state.user && state.user.role === "admin") {
+          var token = state.token;
+          dialog.openExtractionDialog(requestJson, extractionLabelEditor, function (project) {
+            if (state.token === token) showStartedExtraction(project);
+          });
+        }
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    });
     els.openProjectModalButton.addEventListener("click", openProjectModal);
+    els.closePseudoButton.addEventListener("click", function () { els.pseudoDialog.close(); });
+    els.pseudoForm.addEventListener("submit", startPseudoLabeling);
     els.closeProjectModalButton.addEventListener("click", closeProjectModal);
     els.cancelProjectModalButton.addEventListener("click", closeProjectModal);
     els.browseFolderPathButton.addEventListener("click", function () {
@@ -199,13 +223,6 @@
     els.clearSelectedFoldersButton.addEventListener("click", function () {
       state.folderBrowser.selectedFolders = [];
       renderSelectedFolders();
-    });
-    els.addProjectLabelButton.addEventListener("click", addProjectLabel);
-    els.projectLabelNameInput.addEventListener("keydown", function (event) {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        addProjectLabel();
-      }
     });
     els.createUserButton.addEventListener("click", createUser);
     els.createTempUserButton.addEventListener("click", createTempUser);
@@ -247,7 +264,10 @@
       var removeFolder = event.target.closest("[data-remove-folder]");
       var editProject = event.target.closest("[data-edit-project]");
       var progressButton = event.target.closest("[data-project-progress]");
-      if (progressButton) {
+      var pseudoButton = event.target.closest("[data-pseudo-project]");
+      if (pseudoButton) {
+        openPseudoDialog(pseudoButton.dataset.pseudoProject);
+      } else if (progressButton) {
         state.adminActiveTab = "progress";
         renderAdmin(progressButton.dataset.projectProgress);
       } else if (removeProject) {
@@ -283,19 +303,6 @@
       var removeButton = event.target.closest("[data-remove-selected-folder]");
       if (removeButton) {
         removeSelectedFolder(removeButton.dataset.removeSelectedFolder);
-      }
-    });
-
-    els.projectLabelList.addEventListener("click", function (event) {
-      var removeButton = event.target.closest("[data-remove-project-label]");
-      if (removeButton) {
-        removeProjectLabel(parseInt(removeButton.dataset.removeProjectLabel, 10));
-      }
-    });
-    els.projectLabelList.addEventListener("input", function (event) {
-      var colorInput = event.target.closest("[data-project-label-color]");
-      if (colorInput) {
-        updateProjectLabelColor(parseInt(colorInput.dataset.projectLabelColor, 10), colorInput.value);
       }
     });
 
@@ -432,6 +439,9 @@
         users: Array.isArray(data.users) ? data.users : [],
         projects: Array.isArray(data.projects) ? data.projects : []
       };
+      state.admin.projects.forEach(watchProjectJobs);
+      if (!els.projectModal.hidden) projectLabelEditor.refreshSources();
+      if (document.getElementById("extractionDialog").open) extractionLabelEditor.refreshSources();
       renderAdmin();
     } catch (error) {
       if (requestId === state.adminConfigRequestId) {
@@ -445,6 +455,150 @@
       return project;
     }
     return project.progress;
+  }
+
+  function showStartedExtraction(project) {
+    if (!state.admin.projects.some(function (item) { return item.id === project.id; })) {
+      state.admin.projects.push(project);
+      state.admin.assignmentsRendered = false;
+      watchProjectJobs(project);
+    }
+    if (state.adminActiveTab === "projects") {
+      renderProjectList();
+      document.getElementById("project-card-" + project.id).scrollIntoView({ block: "nearest" });
+    }
+    refreshAdmin();
+  }
+
+  function extractionProgressText(job) {
+    return job.video + " · 이미지 " + job.images + "장 · 폴더 " + job.folders + "개";
+  }
+
+  function pseudoProgressText(job) {
+    if (job.total == null) return "대상 이미지 확인 중…";
+    return job.processed + "/" + job.total + "장 처리 · 라벨 저장 " + job.written + "장 (" + job.boxes +
+      "개 박스) · 미검출 " + job.empty + "장 · 건너뜀 " + job.skipped + "장";
+  }
+
+  function classWarning(labels, id, modelName) {
+    var label = labels.find(function (item) { return Number(item.id) === Number(id); });
+    if (!label) return "#" + id + " · 프로젝트에 등록되지 않은 번호";
+    if (modelName != null && modelName.trim().toLowerCase() !== label.name.trim().toLowerCase()) {
+      return "#" + id + " · 프로젝트 라벨 “" + label.name + "”";
+    }
+    return "";
+  }
+
+  function pseudoWarningText(project) {
+    var classes = project.pseudo_labeling.detected_classes || {};
+    var mismatches = Object.keys(classes).filter(function (id) {
+      return classWarning(project.labels, id, classes[id]);
+    }).map(function (id) { return "#" + id + " " + classes[id]; });
+    return mismatches.length ? "⚠ 저장된 모델 클래스와 프로젝트 라벨 불일치 · " + mismatches.join(", ") : "";
+  }
+
+  function pseudoStatusHtml(project) {
+    var job = project.pseudo_labeling;
+    if (!job) return "";
+    var display = {
+      running: ["extracting", "자동 라벨링 중"],
+      done: ["done", "자동 라벨링 완료"],
+      failed: ["inactive", "자동 라벨링 실패"]
+    }[job.status];
+    if (!display) return "";
+    var detail = job.status === "failed" ? job.error : pseudoProgressText(job);
+    return '<div class="project-extraction"><span class="status-pill ' + display[0] + '">' + display[1] +
+      '</span> <span class="muted" id="pseudo-labeling-count-' + escapeAttribute(project.id) + '">' +
+      escapeHtml(detail) + '</span><div class="label-warning" id="pseudo-warning-' + escapeAttribute(project.id) +
+      '">' + escapeHtml(pseudoWarningText(project)) + '</div></div>';
+  }
+
+  function watchProjectJobs(project) {
+    watchProjectJob(project, "extraction", "extraction", extractionProgressText);
+    watchProjectJob(project, "pseudo_labeling", "pseudo-labeling", pseudoProgressText);
+  }
+
+  function watchProjectJob(project, key, endpoint, progressText) {
+    if (!project[key] || project[key].status !== "running") return;
+    async function poll() {
+      if (!state.admin.projects.includes(project)) return;
+      try {
+        var data = await requestJson("/api/admin/projects/" + encodeURIComponent(project.id) + "/" + endpoint);
+        var index = state.admin.projects.indexOf(project);
+        if (index === -1) return;
+        if (data.project) {
+          state.admin.projects[index] = data.project;
+          if (els.assignmentProjectSelect.value === project.id) state.admin.assignmentsRendered = false;
+          renderAdmin();
+          return;
+        }
+        project[key] = data[key];
+        var counter = document.getElementById(endpoint + "-count-" + project.id);
+        if (counter) counter.textContent = progressText(data[key]);
+        if (key === "pseudo_labeling") {
+          var warning = document.getElementById("pseudo-warning-" + project.id);
+          if (warning) warning.textContent = pseudoWarningText(project);
+        }
+      } catch (error) {
+        if (error.status === 404 && state.admin.projects.includes(project)) {
+          await refreshAdmin();
+          return;
+        }
+      }
+      setTimeout(poll, 2000);
+    }
+    setTimeout(poll, 1200);
+  }
+
+  async function openPseudoDialog(projectId) {
+    var project = state.admin.projects.find(function (item) { return item.id === projectId; });
+    if (!project || els.pseudoDialog.open) return;
+    var previous = project.pseudo_labeling || {};
+    els.pseudoDialog.dataset.projectId = projectId;
+    els.pseudoTitle.textContent = project.name + " · 자동 라벨링";
+    els.pseudoModel.value = previous.model_path || "";
+    els.pseudoBatch.value = previous.batch_size || 8;
+    els.pseudoGpus.replaceChildren(new Option("장치 확인 중…", ""));
+    els.pseudoMessage.textContent = "";
+    els.startPseudoButton.disabled = true;
+    els.pseudoDialog.showModal();
+    try {
+      var devices = await requestJson("/api/admin/pseudo-labeling/devices");
+      if (!els.pseudoDialog.open || els.pseudoDialog.dataset.projectId !== projectId) return;
+      els.pseudoGpus.replaceChildren(new Option("0개 · CPU", "0"));
+      for (var i = 1; i <= devices.available; i++) {
+        els.pseudoGpus.add(new Option(i + "개", String(i)));
+      }
+      els.pseudoGpus.value = String(Math.min(previous.gpu_count == null ? 1 : previous.gpu_count, devices.available));
+      els.pseudoMessage.textContent = "CUDA GPU " + devices.gpu_count + "개 중 " + devices.available + "개 사용 가능";
+      els.startPseudoButton.disabled = false;
+    } catch (error) {
+      if (els.pseudoDialog.dataset.projectId === projectId) els.pseudoMessage.textContent = error.message;
+    }
+  }
+
+  async function startPseudoLabeling(event) {
+    event.preventDefault();
+    if (els.startPseudoButton.disabled) return;
+    var projectId = els.pseudoDialog.dataset.projectId;
+    var token = state.token;
+    els.startPseudoButton.disabled = true;
+    try {
+      await requestJson("/api/admin/projects/" + encodeURIComponent(projectId) + "/pseudo-labeling", {
+        method: "POST", body: {
+          model_path: els.pseudoModel.value.trim(), gpu_count: Number(els.pseudoGpus.value),
+          batch_size: els.pseudoBatch.valueAsNumber
+        }
+      });
+      if (state.token !== token) return;
+      if (els.pseudoDialog.open && els.pseudoDialog.dataset.projectId === projectId) els.pseudoDialog.close();
+      await refreshAdmin();
+    } catch (error) {
+      if (els.pseudoDialog.dataset.projectId === projectId) {
+        els.pseudoMessage.textContent = error.message;
+        els.startPseudoButton.disabled = false;
+      }
+    }
   }
 
   async function loadProjectProgress(project) {
@@ -640,16 +794,6 @@
     return { id: id, name: name, color: normalizeLabelColor(color, index) };
   }
 
-  function serializeProjectLabels() {
-    return state.projectLabels.map(function (label, index) {
-      return normalizeProjectLabel(label, index);
-    }).filter(function (label) {
-      return label.name;
-    }).map(function (label) {
-      return { name: label.name, color: label.color };
-    });
-  }
-
   function labelsForImage(image) {
     if (!image) {
       return [];
@@ -767,6 +911,8 @@
         return;
       }
       state.annotations = normalizeAnnotationCopyDefaults(Array.isArray(data.annotations) ? data.annotations : []);
+      var project = state.worker.projects.find(function (item) { return item.id === image.project_id; });
+      if (project && Array.isArray(data.labels)) project.labels = data.labels;
       state.annotationsDirty = false;
       if (data.image) {
         state.images[state.currentImageIndex] = data.image;
@@ -1598,6 +1744,9 @@
   function showBoxLabelPicker(box, editIndex) {
     var editing = typeof editIndex === "number" && editIndex >= 0;
     var selectedLabelId = editing && state.annotations[editIndex] ? state.annotations[editIndex].label_id : undefined;
+    if (editing && classWarning(labelsForImage(currentImage()), selectedLabelId, state.annotations[editIndex].model_label_name)) {
+      selectedLabelId = undefined;
+    }
     state.editingAnnotationIndex = editing ? editIndex : -1;
     renderBoxLabelOptions(selectedLabelId);
     var imageRect = getRenderedImageRect();
@@ -1633,6 +1782,7 @@
         return;
       }
       annotation.label_id = labelId;
+      delete annotation.model_label_name;
       annotation.label_name = label ? label.name : String(labelId);
       annotation.label_color = label ? label.color : defaultLabelColor(labelId);
       state.annotationsDirty = true;
@@ -1719,12 +1869,14 @@
     var skipped = 0;
     var pasted = state.annotationClipboard.reduce(function (items, annotation) {
       var copy = cloneAnnotation(annotation);
-      if (!labelsById.hasOwnProperty(copy.label_id)) {
-        skipped += 1;
-        return items;
+      if (copy.model_label_name == null) {
+        if (!labelsById.hasOwnProperty(copy.label_id)) {
+          skipped += 1;
+          return items;
+        }
+        copy.label_name = labelsById[copy.label_id].name;
+        copy.label_color = labelsById[copy.label_id].color;
       }
-      copy.label_name = labelsById[copy.label_id].name;
-      copy.label_color = labelsById[copy.label_id].color;
       copy.copy_enabled = true;
       items.push(copy);
       return items;
@@ -1750,6 +1902,7 @@
     return {
       label_id: Number(annotation.label_id),
       label_name: annotation.label_name,
+      model_label_name: annotation.model_label_name,
       label_color: annotation.label_color,
       x: Number(annotation.x),
       y: Number(annotation.y),
@@ -1919,14 +2072,17 @@
       els.annotationList.innerHTML = '<div class="table-empty">아직 라벨링한 박스가 없습니다.</div>';
       return;
     }
+    var labels = labelsForImage(currentImage());
     els.annotationList.innerHTML = state.annotations.map(function (annotation, index) {
       var color = labelColorForAnnotation(annotation);
+      var warning = classWarning(labels, annotation.label_id, annotation.model_label_name);
       var selected = index === state.selectedAnnotationIndex;
       return '<div class="annotation-row' + (selected ? " selected" : "") + '" data-select-annotation="' + escapeAttribute(index) + '" title="클릭하여 Ctrl+V 복사 대상 선택/해제">' +
         '<label class="annotation-copy-check" title="Ctrl+V 복사 대상">' +
         '<input type="checkbox" data-copy-annotation="' + escapeAttribute(index) + '"' + (annotationCopyEnabled(annotation) ? " checked" : "") + ' aria-label="' + escapeAttribute(index + 1 + "번 복사 대상") + '">' +
         '</label>' +
         '<div><strong><i class="annotation-color-dot" style="--label-color: ' + escapeAttribute(color) + ';"></i>' + escapeHtml(index + 1 + ". " + annotation.label_name) + '</strong>' +
+        (warning ? '<span class="label-warning">⚠ ' + escapeHtml(warning) + '</span>' : '') +
         '<span>' + escapeHtml("x " + percent(annotation.x) + ", y " + percent(annotation.y) + ", w " + percent(annotation.width) + ", h " + percent(annotation.height)) + '</span></div>' +
         '<button class="button danger compact" type="button" data-remove-annotation="' + escapeAttribute(index) + '">삭제</button>' +
         '</div>';
@@ -1965,6 +2121,7 @@
         annotations: state.annotations.map(function (annotation) {
           return {
             label_id: annotation.label_id,
+            model_label_name: annotation.model_label_name,
             x: annotation.x,
             y: annotation.y,
             width: annotation.width,
@@ -2204,16 +2361,11 @@
     els.projectModalDescription.textContent = "프로젝트 이름, 라벨 목록, 서버 로컬 접근 폴더를 설정합니다.";
     els.createProjectButton.textContent = "프로젝트 생성";
     els.projectNameInput.value = "";
-    els.projectLabelNameInput.value = "";
-    state.projectLabels = defaultProjectLabels();
-    if (els.projectLabelColorInput) {
-      els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
-    }
+    projectLabelEditor.reset();
     els.projectAllowDeleteInput.checked = false;
     state.folderBrowser.selectedFolders = [];
     els.projectModal.hidden = false;
     els.projectNameInput.focus();
-    renderProjectLabelEditor();
     renderSelectedFolders();
     if (!state.folderBrowser.entries.length) {
       browseFolders(state.folderBrowser.currentPath || "");
@@ -2238,11 +2390,7 @@
     els.projectModalDescription.textContent = "프로젝트 정보와 라벨 목록을 수정하고, 새 YOLO 상위 폴더를 추가 등록합니다.";
     els.createProjectButton.textContent = "수정 저장";
     els.projectNameInput.value = project.name || "";
-    els.projectLabelNameInput.value = "";
-    state.projectLabels = (project.labels || []).map(normalizeProjectLabel).filter(function (label) { return label.name; });
-    if (els.projectLabelColorInput) {
-      els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
-    }
+    projectLabelEditor.reset(project.labels, project.id);
     els.projectAllowDeleteInput.checked = projectAllowsWorkerDelete(project);
     state.folderBrowser.selectedFolders = [];
     var existingPaths = selectedFolderPathsForProject(project);
@@ -2250,7 +2398,6 @@
     els.folderPathInput.value = primaryPath;
     els.projectModal.hidden = false;
     els.projectNameInput.focus();
-    renderProjectLabelEditor();
     renderSelectedFolders();
     if (primaryPath) {
       browseFolders(primaryPath);
@@ -2309,52 +2456,105 @@
     renderSelectedFolders();
   }
 
-  function addProjectLabel() {
-    var labelName = els.projectLabelNameInput.value.trim();
-    if (!labelName) {
-      setStatus("추가할 라벨 이름을 입력하세요.", "error");
-      return;
-    }
-    var exists = state.projectLabels.some(function (item) {
-      return String(item.name || "").toLowerCase() === labelName.toLowerCase();
-    });
-    if (exists) {
-      setStatus("이미 추가된 라벨입니다.", "error");
-      return;
-    }
-    var index = state.projectLabels.length;
-    state.projectLabels.push({
-      id: index,
-      name: labelName,
-      color: normalizeLabelColor(els.projectLabelColorInput ? els.projectLabelColorInput.value : "", index)
-    });
-    els.projectLabelNameInput.value = "";
-    if (els.projectLabelColorInput) {
-      els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
-    }
-    renderProjectLabelEditor();
-  }
+  function createLabelEditor(container, reportError) {
+    var nameInput = container.querySelector('input[type="text"]');
+    var colorInput = container.querySelector(".label-color-input");
+    var list = container.querySelector(".label-editor-list");
+    var sourceSelect = container.querySelector(".label-source");
+    var importButton = container.querySelector(".import-labels");
+    var editingId = "";
+    var labels = [];
 
-  function updateProjectLabelColor(index, color) {
-    if (Number.isNaN(index) || index < 0 || index >= state.projectLabels.length) {
-      return;
+    function refreshSources() {
+      var selectedId = sourceSelect.value;
+      var sources = state.admin.projects.filter(function (project) {
+        return project.id !== editingId && Array.isArray(project.labels) && project.labels.length;
+      });
+      var placeholder = sources.length ? "라벨을 가져올 프로젝트 선택" : "가져올 프로젝트가 없습니다";
+      var options = document.createDocumentFragment();
+      options.appendChild(new Option(placeholder, ""));
+      sources.forEach(function (project) {
+        var option = new Option(project.name, project.id);
+        option.selected = project.id === selectedId;
+        options.appendChild(option);
+      });
+      sourceSelect.replaceChildren(options);
+      sourceSelect.disabled = !sources.length;
+      importButton.disabled = !sourceSelect.value;
     }
-    state.projectLabels[index] = {
-      id: index,
-      name: state.projectLabels[index].name,
-      color: normalizeLabelColor(color, index)
+
+    function setLabels(items) {
+      labels = items.map(normalizeProjectLabel).filter(function (label) { return label.name; });
+      render();
+    }
+
+    function render() {
+      colorInput.value = nextAvailableLabelColor(labels);
+      list.innerHTML = labels.map(function (label, index) {
+        return '<span class="label-editor-chip">' +
+          '<input class="label-chip-color" type="color" value="' + label.color + '" data-project-label-color="' + index + '" aria-label="' + escapeAttribute(label.name + " 색상") + '">' +
+          '<strong style="--label-color: ' + label.color + ';">' + index + '</strong>' +
+          '<span>' + escapeHtml(label.name) + '</span>' +
+          '<button type="button" data-remove-project-label="' + index + '">삭제</button></span>';
+      }).join("") || '<div class="table-empty">추가된 라벨이 없습니다.</div>';
+    }
+
+    function addLabel() {
+      var name = nameInput.value.trim();
+      if (!name) {
+        reportError("추가할 라벨 이름을 입력하세요.");
+        return;
+      }
+      if (labels.some(function (label) { return label.name.toLowerCase() === name.toLowerCase(); })) {
+        reportError("이미 추가된 라벨입니다.");
+        return;
+      }
+      labels.push({ name: name, color: colorInput.value });
+      nameInput.value = "";
+      render();
+    }
+
+    sourceSelect.addEventListener("change", function () {
+      importButton.disabled = !sourceSelect.value;
+    });
+    importButton.addEventListener("click", function () {
+      var source = state.admin.projects.find(function (project) { return project.id === sourceSelect.value; });
+      if (source) setLabels(source.labels);
+    });
+    container.querySelector(".label-add-row button").addEventListener("click", addLabel);
+    nameInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addLabel();
+      }
+    });
+    list.addEventListener("click", function (event) {
+      var button = event.target.closest("[data-remove-project-label]");
+      if (button) {
+        labels.splice(Number(button.dataset.removeProjectLabel), 1);
+        render();
+      }
+    });
+    list.addEventListener("input", function (event) {
+      var input = event.target.closest("[data-project-label-color]");
+      if (input) {
+        labels[Number(input.dataset.projectLabelColor)].color = input.value;
+        input.nextElementSibling.style.setProperty("--label-color", input.value);
+      }
+    });
+    return {
+      reset: function (initial, projectId) {
+        editingId = projectId || "";
+        sourceSelect.value = "";
+        refreshSources();
+        nameInput.value = "";
+        setLabels(initial || defaultProjectLabels());
+      },
+      refreshSources: refreshSources,
+      values: function () {
+        return labels.map(function (label) { return { name: label.name, color: label.color }; });
+      }
     };
-  }
-
-  function removeProjectLabel(index) {
-    if (Number.isNaN(index)) {
-      return;
-    }
-    state.projectLabels.splice(index, 1);
-    if (els.projectLabelColorInput) {
-      els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
-    }
-    renderProjectLabelEditor();
   }
 
   async function createUser() {
@@ -2425,7 +2625,7 @@
 
   async function saveProjectFromModal() {
     var name = els.projectNameInput.value.trim();
-    var labels = serializeProjectLabels();
+    var labels = projectLabelEditor.values();
     var folderPaths = state.folderBrowser.selectedFolders.slice();
     var currentFolderPath = (state.folderBrowser.currentPath || els.folderPathInput.value || "").trim();
     var allowWorkerDelete = Boolean(els.projectAllowDeleteInput.checked);
@@ -2467,13 +2667,8 @@
       }
       els.projectNameInput.value = "";
       state.editingProjectId = "";
-      state.projectLabels = defaultProjectLabels();
-      if (els.projectLabelColorInput) {
-        els.projectLabelColorInput.value = nextAvailableLabelColor(state.projectLabels);
-      }
       els.projectAllowDeleteInput.checked = false;
       state.folderBrowser.selectedFolders = [];
-      renderProjectLabelEditor();
       renderSelectedFolders();
       closeProjectModal();
       if (wasEditing) {
@@ -2551,7 +2746,9 @@
     var text = await response.text();
     var data = text ? parseJson(text) : null;
     if (!response.ok) {
-      throw new Error(extractErrorMessage(data, response));
+      var error = new Error(extractErrorMessage(data, response));
+      error.status = response.status;
+      throw error;
     }
     return data;
   }
@@ -2722,24 +2919,6 @@
     }).join("");
   }
 
-  function renderProjectLabelEditor() {
-    state.projectLabels = state.projectLabels.map(normalizeProjectLabel).filter(function (label) { return label.name; });
-    els.projectLabelsInput.value = state.projectLabels.map(function (label) { return label.name; }).join("\n");
-    if (!state.projectLabels.length) {
-      els.projectLabelList.innerHTML = '<div class="table-empty">추가된 라벨이 없습니다.</div>';
-      return;
-    }
-    els.projectLabelList.innerHTML = state.projectLabels.map(function (label, index) {
-      var color = normalizeLabelColor(label.color, index);
-      return '<span class="label-editor-chip">' +
-        '<input class="label-chip-color" type="color" value="' + escapeAttribute(color) + '" data-project-label-color="' + escapeAttribute(index) + '" aria-label="' + escapeAttribute(label.name + " 색상") + '">' +
-        '<strong style="--label-color: ' + escapeAttribute(color) + ';">' + escapeHtml(index) + '</strong>' +
-        '<span>' + escapeHtml(label.name) + '</span>' +
-        '<button type="button" data-remove-project-label="' + escapeAttribute(index) + '">삭제</button>' +
-        '</span>';
-    }).join("");
-  }
-
   function renderAdmin(progressProjectId) {
     renderAdminTabs();
     if (state.adminActiveTab === "projects") {
@@ -2781,6 +2960,7 @@
     els.adminAssignmentsView.hidden = tab !== "assignments";
     els.adminProgressView.hidden = tab !== "progress";
     els.openProjectModalButton.hidden = tab !== "projects";
+    els.openExtractionButton.hidden = tab !== "projects";
     els.adminViewTitle.textContent = meta[tab][0];
     els.adminViewDescription.textContent = meta[tab][1];
   }
@@ -2892,22 +3072,40 @@
     els.projectList.innerHTML = projects.map(function (project) {
       var labels = renderProjectLabelSummary(project.labels || []);
       var deletePolicyText = projectAllowsWorkerDelete(project) ? "작업자 허용" : "비활성";
+      var job = project.extraction;
+      var running = job && job.status === "running";
+      var pseudo = project.pseudo_labeling;
+      var predicting = pseudo && pseudo.status === "running";
       var summary = projectSummary(project);
-      return '<section class="project-card">' +
+      var extractionHtml = "";
+      if (running) {
+        extractionHtml = '<span class="status-pill extracting">이미지 추출 중</span> ' +
+          '<span class="muted" id="extraction-count-' + escapeAttribute(project.id) + '">' + escapeHtml(extractionProgressText(job)) + '</span>';
+      } else if (job && job.status === "failed") {
+        extractionHtml = '<span class="status-pill inactive">추출 실패</span> ' + escapeHtml(job.error || "");
+      } else if (job && job.status === "done") {
+        extractionHtml = '<span class="status-pill done">추출 완료</span> ' + escapeHtml(job.images + "장");
+      }
+      return '<section class="project-card" id="project-card-' + escapeAttribute(project.id) + '">' +
         '<div class="list-header"><div><div class="panel-title">' + escapeHtml(project.name) + '</div>' +
         '<div class="project-labels"><span class="muted">라벨:</span> ' + labels + '</div>' +
         '<div class="project-labels"><span class="muted">삭제:</span> ' + escapeHtml(deletePolicyText) + '</div></div>' +
-        '<div class="project-actions">' +
+        (running ? "" : '<div class="project-actions">' +
+        (project.folders.length ? '<button class="button secondary compact" data-pseudo-project="' + escapeAttribute(project.id) + '"' +
+          (predicting ? ' disabled' : '') + '>자동 라벨링</button>' : '') +
         '<button class="button secondary compact" data-project-progress="' + escapeAttribute(project.id) + '">진행상황</button>' +
         '<button class="button secondary compact" data-edit-project="' + escapeAttribute(project.id) + '">프로젝트 수정</button>' +
-        '<button class="button danger compact" data-remove-project="' + escapeAttribute(project.id) + '">프로젝트 삭제</button>' +
-        '</div></div>' +
-        '<div class="project-summary-grid">' +
+        '<button class="button danger compact" data-remove-project="' + escapeAttribute(project.id) + '"' +
+          (predicting ? ' disabled' : '') + '>프로젝트 삭제</button>' +
+        '</div>') + '</div>' +
+        (extractionHtml ? '<div class="project-extraction">' + extractionHtml + '</div>' : "") +
+        pseudoStatusHtml(project) +
+        (running ? "" : '<div class="project-summary-grid">' +
         summary.metrics.map(function (item) {
           return '<div class="summary-metric"><span>' + escapeHtml(item.label) + '</span><strong>' + escapeHtml(item.value) + '</strong></div>';
         }).join("") +
         '<div class="summary-metric wide"><span>배정</span><strong>' + summary.assignments + '</strong></div>' +
-        '</div>' +
+        '</div>') +
         "</section>";
     }).join("");
   }
@@ -3179,7 +3377,7 @@
     els.deleteImageButton.disabled = state.busy || !hasLoadedImage || !canDeleteImage(image);
     if (isAdmin) {
       [
-        els.adminRefreshButton, els.openProjectModalButton, els.createUserButton, els.createTempUserButton,
+        els.adminRefreshButton, els.openExtractionButton, els.openProjectModalButton, els.createUserButton, els.createTempUserButton,
         els.createProjectButton, els.addProjectLabelButton, els.saveAssignmentButton, els.browseFolderPathButton,
         els.selectCurrentFolderButton, els.clearSelectedFoldersButton, els.projectAllowDeleteInput, els.closeProjectModalButton,
         els.cancelProjectModalButton
