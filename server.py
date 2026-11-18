@@ -123,6 +123,8 @@ class PseudoLabelPayload(BaseModel):
     model_path: str
     gpu_count: int = Field(ge=0, strict=True)
     batch_size: int = Field(gt=0, strict=True)
+    image_size: int | None = Field(default=None, gt=0, strict=True)
+    confidence: float = Field(default=0.25, ge=0, le=1, strict=True)
 
 
 class ProjectLabelsPayload(BaseModel):
@@ -1794,7 +1796,7 @@ def startup() -> None:
     for project in state["projects"]:
         pseudo = project.get("pseudo_labeling", {})
         if pseudo.get("status") == "running":
-            pseudo.update(status="failed", error="서버가 재시작되어 중단되었습니다. 다시 실행하면 이미 저장된 라벨은 건너뜁니다.")
+            pseudo.update(status="failed", error="서버가 재시작되어 중단되었습니다. 다시 실행하면 전체 이미지를 재라벨링합니다.")
             interrupted = True
     if interrupted:
         write_state(state)
@@ -1875,47 +1877,39 @@ def run_pseudo_job(project: dict, job: dict) -> None:
 
     def save(target: LabelTarget, annotations: list[dict]) -> None:
         with STATE_LOCK:
-            cleanup_expired_claims()
-            if (target.label.exists() or not target.image.is_file()
-                    or active_claim_for_image(project_id, target.folder_id, target.relative_path)):
+            if not target.image.is_file():
                 job["skipped"] += 1
-            elif not annotations:
-                job["empty"] += 1
             else:
                 meta_path = sidecar_meta_path_for(folders[target.folder_id], target.relative_path)
-                if write_yolo_annotations(target.label, annotations, meta_path, {}, overwrite=False):
-                    job["written"] += 1
-                    job["boxes"] += len(annotations)
+                write_yolo_annotations(target.label, annotations, meta_path, {})
+                job["written"] += 1
+                job["boxes"] += len(annotations)
+                if annotations:
                     detected = dict(job["detected_classes"])
                     for box in annotations:
                         detected[str(box["label_id"])] = box["model_label_name"]
                     job["detected_classes"] = detected
                 else:
-                    job["skipped"] += 1
+                    job["empty"] += 1
             job["processed"] += 1
 
     error = ""
     try:
-        with STATE_LOCK:
-            cleanup_expired_claims()
-            claims = claimed_paths_by_folder(project_id)
         targets = []
-        total = 0
         for folder in project["folders"]:
             if not Path(folder["images_path"]).is_dir():
                 raise ValueError(f"이미지 폴더를 찾을 수 없습니다. {folder['images_path']}")
-            files = image_files(folder)
-            total += len(files)
-            claimed = claims.get(folder["id"], set())
-            for path in files:
+            for path in image_files(folder):
                 rel = image_rel_path(folder, path)
                 label_path = yolo_label_path_for(folder, rel)
-                if rel not in claimed and not label_path.exists():
-                    targets.append(LabelTarget(folder["id"], rel, path, label_path))
+                targets.append(LabelTarget(folder["id"], rel, path, label_path))
         with STATE_LOCK:
-            job.update(total=total, processed=total - len(targets), skipped=total - len(targets))
+            job["total"] = len(targets)
         if targets:
-            predict_images(job["model_path"], targets, job["gpu_ids"], job["batch_size"], save)
+            predict_images(
+                job["model_path"], targets, job["gpu_ids"], job["batch_size"], save,
+                image_size=job["image_size"], confidence=job["confidence"],
+            )
     except Exception as exc:
         error = str(exc) or type(exc).__name__
 
@@ -1953,6 +1947,7 @@ def api_start_pseudo(
         job = {
             "status": "running", "model_path": str(path), "gpu_count": payload.gpu_count,
             "gpu_ids": devices, "batch_size": payload.batch_size, "total": None,
+            "image_size": payload.image_size, "confidence": payload.confidence,
             "processed": 0, "written": 0, "skipped": 0, "empty": 0, "boxes": 0, "detected_classes": {},
         }
         project["pseudo_labeling"] = dict(job)

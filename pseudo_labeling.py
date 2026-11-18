@@ -25,11 +25,13 @@ def cuda_device_count() -> int:
 def predict_images(
     model_path: str, targets: list[LabelTarget], gpu_ids: list[int], batch_size: int,
     save: Callable[[LabelTarget, list[dict]], None],
+    *, image_size: int | None = None, confidence: float = 0.25,
 ) -> None:
     from ultralytics import YOLO
     import torch
 
     devices = [torch.device("cuda", index) for index in gpu_ids] or [torch.device("cpu")]
+    size_option = {"imgsz": image_size} if image_size is not None else {}
     stop = threading.Event()
 
     def run_device(device: torch.device, shard: list[LabelTarget]) -> None:
@@ -43,7 +45,7 @@ def predict_images(
             batch = shard[offset:offset + batch_size]
             results = model.predict(
                 source=[str(target.image) for target in batch], device=device, batch=len(batch),
-                classes=None, conf=0.25, verbose=False, save=False, save_txt=False,
+                classes=None, conf=confidence, verbose=False, save=False, save_txt=False, **size_option,
             )
             if len(results) != len(batch):
                 raise RuntimeError("배치 이미지 수와 모델 결과 수가 일치하지 않습니다.")

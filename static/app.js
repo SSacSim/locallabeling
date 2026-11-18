@@ -103,6 +103,7 @@
       "adminProjectsView", "adminWorkersView", "adminAssignmentsView", "adminProgressView",
       "adminViewTitle", "adminViewDescription", "openProjectModalButton", "openExtractionButton",
       "pseudoDialog", "pseudoTitle", "pseudoForm", "pseudoModel", "pseudoGpus", "pseudoBatch",
+      "pseudoImageSize", "pseudoConfidence",
       "pseudoMessage", "pseudoLabelCheck", "cancelPseudoButton", "continuePseudoButton", "startPseudoButton", "closePseudoButton",
       "projectModal", "projectModalTitle", "projectModalDescription", "closeProjectModalButton", "cancelProjectModalButton", "projectNameInput",
       "projectAllowDeleteInput", "addProjectLabelButton",
@@ -570,10 +571,13 @@
       var progress = await requestJson("/api/admin/projects/" + encodeURIComponent(projectId) + "/progress", { cache: "no-store" });
       if (!currentPseudoDialog(requestId)) return;
       var labeled = progress.folders.reduce(function (count, folder) { return count + folder.labeled; }, 0);
-      if (labeled > 0) {
-        var available = progress.folders.reduce(function (count, folder) { return count + folder.available; }, 0);
-        els.pseudoLabelCheck.textContent = "이미 " + labeled.toLocaleString("ko-KR") + "장에 라벨이 저장되어 있습니다. " +
-          "기존 라벨은 건너뜁니다. 현재 자동 라벨링 대상은 " + available.toLocaleString("ko-KR") + "장입니다. 설정을 계속할까요?";
+      var claimed = progress.folders.reduce(function (count, folder) { return count + folder.claimed; }, 0);
+      if (labeled || claimed) {
+        var total = progress.folders.reduce(function (count, folder) { return count + folder.total; }, 0);
+        els.pseudoLabelCheck.textContent = "전체 " + total.toLocaleString("ko-KR") + "장을 다시 추론합니다. " +
+          (labeled ? "기존 " + labeled.toLocaleString("ko-KR") + "장의 라벨은 새 결과로 덮어씁니다. " : "") +
+          (claimed ? "작업자가 선점한 " + claimed.toLocaleString("ko-KR") + "장도 포함됩니다. " : "") +
+          "설정을 계속할까요?";
         els.continuePseudoButton.hidden = false;
         els.cancelPseudoButton.focus();
         return;
@@ -599,6 +603,8 @@
     els.startPseudoButton.hidden = false;
     els.pseudoModel.value = previous.model_path || "";
     els.pseudoBatch.value = previous.batch_size || 8;
+    els.pseudoImageSize.value = previous.image_size ?? els.pseudoImageSize.defaultValue;
+    els.pseudoConfidence.value = previous.confidence ?? 0.25;
     els.pseudoGpus.replaceChildren(new Option("장치 확인 중…", ""));
     els.pseudoMessage.textContent = "";
     els.startPseudoButton.disabled = true;
@@ -629,7 +635,9 @@
       await requestJson("/api/admin/projects/" + encodeURIComponent(projectId) + "/pseudo-labeling", {
         method: "POST", body: {
           model_path: els.pseudoModel.value.trim(), gpu_count: Number(els.pseudoGpus.value),
-          batch_size: els.pseudoBatch.valueAsNumber
+          batch_size: els.pseudoBatch.valueAsNumber,
+          image_size: els.pseudoImageSize.value === "" ? null : els.pseudoImageSize.valueAsNumber,
+          confidence: els.pseudoConfidence.valueAsNumber
         }
       });
       if (state.token !== token) return;
