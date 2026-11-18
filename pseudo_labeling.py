@@ -22,23 +22,36 @@ def cuda_device_count() -> int:
     return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
+def load_detector(model_path: str):
+    from ultralytics import YOLO
+
+    model = YOLO(model_path)
+    if model.task != "detect":
+        raise ValueError(f"객체 탐지(detect) 모델을 선택하세요. 현재 모델 유형: {model.task}")
+    return model
+
+
 def predict_images(
     model_path: str, targets: list[LabelTarget], gpu_ids: list[int], batch_size: int,
     save: Callable[[LabelTarget, list[dict]], None],
     *, image_size: int | None = None, confidence: float = 0.25,
+    on_model_classes: Callable[[dict[int, str]], None] | None = None,
 ) -> None:
-    from ultralytics import YOLO
     import torch
 
+    if not targets:
+        if on_model_classes:
+            on_model_classes(load_detector(model_path).names)
+        return
     devices = [torch.device("cuda", index) for index in gpu_ids] or [torch.device("cpu")]
     size_option = {"imgsz": image_size} if image_size is not None else {}
     stop = threading.Event()
 
     def run_device(device: torch.device, shard: list[LabelTarget]) -> None:
-        model = YOLO(model_path)
-        if model.task != "detect":
-            raise ValueError(f"객체 탐지(detect) 모델을 선택하세요. 현재 모델 유형: {model.task}")
+        model = load_detector(model_path)
         names = model.names
+        if device == devices[0] and on_model_classes:
+            on_model_classes(names)
         for offset in range(0, len(shard), batch_size):
             if stop.is_set():
                 return

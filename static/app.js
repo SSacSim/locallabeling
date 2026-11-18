@@ -269,7 +269,10 @@
       var editProject = event.target.closest("[data-edit-project]");
       var progressButton = event.target.closest("[data-project-progress]");
       var pseudoButton = event.target.closest("[data-pseudo-project]");
-      if (pseudoButton) {
+      var classCheck = event.target.closest("[data-check-model-classes]");
+      if (classCheck) {
+        checkModelClasses(classCheck);
+      } else if (pseudoButton) {
         openPseudoDialog(pseudoButton.dataset.pseudoProject);
       } else if (progressButton) {
         state.adminActiveTab = "progress";
@@ -484,21 +487,78 @@
       "개 박스) · 미검출 " + job.empty + "장 · 건너뜀 " + job.skipped + "장";
   }
 
+  function labelNameKey(name) {
+    return name.trim().normalize("NFC").toLowerCase();
+  }
+
   function classWarning(labels, id, modelName) {
     var label = labels.find(function (item) { return Number(item.id) === Number(id); });
     if (!label) return "#" + id + " · 프로젝트에 등록되지 않은 번호";
-    if (modelName != null && modelName.trim().toLowerCase() !== label.name.trim().toLowerCase()) {
+    if (modelName != null && labelNameKey(modelName) !== labelNameKey(label.name)) {
       return "#" + id + " · 프로젝트 라벨 “" + label.name + "”";
     }
     return "";
   }
 
   function pseudoWarningText(project) {
-    var classes = project.pseudo_labeling.detected_classes || {};
-    var mismatches = Object.keys(classes).filter(function (id) {
-      return classWarning(project.labels, id, classes[id]);
-    }).map(function (id) { return "#" + id + " " + classes[id]; });
-    return mismatches.length ? "⚠ 저장된 모델 클래스와 프로젝트 라벨 불일치 · " + mismatches.join(", ") : "";
+    var job = project.pseudo_labeling;
+    var classes = job.model_classes || job.detected_classes || {};
+    var projectByName = new Map(project.labels.map(function (label) { return [labelNameKey(label.name), label]; }));
+    var modelNames = new Set();
+    var missingInProject = [];
+    var differentIds = [];
+    Object.entries(classes).forEach(function (entry) {
+      var id = Number(entry[0]), name = entry[1];
+      var key = labelNameKey(name);
+      modelNames.add(key);
+      var label = projectByName.get(key);
+      if (!label) missingInProject.push("#" + id + " " + name);
+      else if (Number(label.id) !== id) differentIds.push(name + " (모델 #" + id + " / 프로젝트 #" + label.id + ")");
+    });
+    var warnings = [];
+    if (missingInProject.length) warnings.push("⚠ 프로젝트에 없는 모델 라벨 · " + missingInProject.join(", "));
+    if (job.model_classes) {
+      var missingInModel = project.labels.filter(function (label) { return !modelNames.has(labelNameKey(label.name)); });
+      if (missingInModel.length) warnings.push("⚠ 모델에 없는 프로젝트 라벨 · " + missingInModel.map(function (label) {
+        return "#" + label.id + " " + label.name;
+      }).join(", "));
+    }
+    if (differentIds.length) warnings.push("⚠ 번호가 다른 라벨 · " + differentIds.join(", "));
+    return warnings.join("\n");
+  }
+
+  function pseudoClassDetails(project) {
+    var job = project.pseudo_labeling;
+    if (job.status !== "done") return "";
+    if (!job.model_classes && job.model_path) {
+      return '<div class="pseudo-class-history"><span class="muted">이전 실행에는 전체 모델 라벨 목록이 없습니다.</span> ' +
+        '<button type="button" class="button secondary compact" data-check-model-classes="' + escapeAttribute(project.id) +
+        '">모델 라벨 확인</button></div>';
+    }
+    if (!job.model_classes || !job.detected_classes) return "";
+    var undetected = Object.entries(job.model_classes).filter(function (entry) {
+      return !Object.hasOwn(job.detected_classes, entry[0]);
+    }).map(function (entry) { return "#" + entry[0] + " " + entry[1]; });
+    return undetected.length ? '<details class="muted"><summary>이번 실행에서 미검출된 모델 라벨 ' +
+      undetected.length + '개</summary>' + escapeHtml(undetected.join(", ")) + '</details>' : "";
+  }
+
+  async function checkModelClasses(button) {
+    var token = state.token;
+    button.disabled = true;
+    button.textContent = "모델 라벨 확인 중…";
+    try {
+      await requestJson("/api/admin/projects/" + encodeURIComponent(button.dataset.checkModelClasses) +
+        "/pseudo-labeling/classes", { method: "POST" });
+      if (token === state.token) await refreshAdmin();
+    } catch (error) {
+      if (token === state.token && button.isConnected) {
+        button.parentElement.querySelector(".muted").textContent = error.message;
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = "모델 라벨 확인";
+    }
   }
 
   function pseudoStatusHtml(project) {
@@ -514,7 +574,7 @@
     return '<div class="project-extraction"><span class="status-pill ' + display[0] + '">' + display[1] +
       '</span> <span class="muted" id="pseudo-labeling-count-' + escapeAttribute(project.id) + '">' +
       escapeHtml(detail) + '</span><div class="label-warning" id="pseudo-warning-' + escapeAttribute(project.id) +
-      '">' + escapeHtml(pseudoWarningText(project)) + '</div></div>';
+      '">' + escapeHtml(pseudoWarningText(project)) + '</div>' + pseudoClassDetails(project) + '</div>';
   }
 
   function watchProjectJobs(project) {

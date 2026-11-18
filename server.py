@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from pseudo_labeling import LabelTarget, cuda_device_count, predict_images
+from pseudo_labeling import LabelTarget, cuda_device_count, load_detector, predict_images
 from video_extraction import STAGING_PREFIX, VIDEO_EXTENSIONS, extract_videos
 
 
@@ -1875,6 +1875,10 @@ def run_pseudo_job(project: dict, job: dict) -> None:
     project_id = project["id"]
     folders = {folder["id"]: folder for folder in project["folders"]}
 
+    def record_model_classes(names: dict[int, str]) -> None:
+        with STATE_LOCK:
+            job["model_classes"] = {str(class_id): name for class_id, name in names.items()}
+
     def save(target: LabelTarget, annotations: list[dict]) -> None:
         with STATE_LOCK:
             if not target.image.is_file():
@@ -1905,11 +1909,10 @@ def run_pseudo_job(project: dict, job: dict) -> None:
                 targets.append(LabelTarget(folder["id"], rel, path, label_path))
         with STATE_LOCK:
             job["total"] = len(targets)
-        if targets:
-            predict_images(
-                job["model_path"], targets, job["gpu_ids"], job["batch_size"], save,
-                image_size=job["image_size"], confidence=job["confidence"],
-            )
+        predict_images(
+            job["model_path"], targets, job["gpu_ids"], job["batch_size"], save,
+            image_size=job["image_size"], confidence=job["confidence"], on_model_classes=record_model_classes,
+        )
     except Exception as exc:
         error = str(exc) or type(exc).__name__
 
@@ -1967,6 +1970,41 @@ def api_pseudo_status(project_id: str, _: dict = Depends(require_admin)) -> dict
         if job:
             project["pseudo_labeling"] = dict(job)
     return {"project": public_project(project, None)}
+
+
+@app.post("/api/admin/projects/{project_id}/pseudo-labeling/classes")
+def api_check_pseudo_classes(project_id: str, _: dict = Depends(require_admin)) -> dict:
+    with STATE_LOCK:
+        require_pseudo_idle(project_id)
+        project = project_by_id(load_state(), project_id)
+        job = project.get("pseudo_labeling", {})
+        if "model_classes" in job:
+            return {"ok": True}
+        if not job.get("model_path"):
+            raise ApiError(400, "model_path_missing", "이전 자동 라벨링에 저장된 모델 경로가 없습니다.")
+    path = resolve_server_path(job["model_path"])
+    if path.suffix.lower() != ".pt" or not path.is_file():
+        raise ApiError(400, "invalid_model", f"저장된 모델 파일을 찾을 수 없습니다. {path}")
+    try:
+        names = load_detector(str(path)).names
+    except Exception as exc:
+        raise ApiError(400, "model_read_failed", f"모델 라벨을 읽지 못했습니다. {exc}") from exc
+    model_classes = {str(class_id): name for class_id, name in names.items()}
+    for class_id, name in job.get("detected_classes", {}).items():
+        if model_classes.get(class_id) != name:
+            raise ApiError(409, "model_classes_changed",
+                           f"현재 모델 파일의 #{class_id} 라벨이 이전 검출 기록({name})과 다릅니다. 당시 모델 파일을 확인하세요.")
+    with STATE_LOCK:
+        require_pseudo_idle(project_id)
+        state = load_state()
+        project = project_by_id(state, project_id)
+        current = project.get("pseudo_labeling", {})
+        if "model_classes" not in current:
+            if current != job:
+                raise ApiError(409, "pseudo_job_changed", "자동 라벨링 실행 기록이 변경되었습니다. 다시 확인하세요.")
+            current["model_classes"] = model_classes
+            write_state(state)
+        return {"ok": True}
 
 
 @app.get("/api/admin/folders/browse")

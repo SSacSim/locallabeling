@@ -1045,6 +1045,14 @@ body.worker-mode .image-meta {
   font-weight: 600;
 }
 
+.project-extraction .label-warning {
+  white-space: pre-line;
+}
+
+.pseudo-class-history {
+  margin-top: 6px;
+}
+
 .status-pill.review {
   border-color: #b9d6ef;
   background: #e8f2fb;

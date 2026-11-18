@@ -35,6 +35,8 @@ class PseudoLabelingTests(unittest.TestCase):
 
             def predict_batch(model, targets, gpus, batch, save, **options):
                 self.assertEqual([target.image for target in targets], [image])
+                self.assertEqual((options["image_size"], options["confidence"]), (320, 0.8))
+                options["on_model_classes"]({2: "truck", 3: "bus"})
                 save(targets[0], next(predictions))
 
             claim = dict(project_id=project_id, folder_id="f", rel_path="sub/empty.jpg", expires_at="2099-01-01T00:00:00Z")
@@ -46,13 +48,15 @@ class PseudoLabelingTests(unittest.TestCase):
                 server.run_pseudo_job(project, first)
                 self.assertEqual(label.read_bytes(), b"")
                 self.assertEqual((first["status"], first["written"], first["empty"], first["boxes"]), ("done", 1, 1, 0))
+                self.assertEqual(first["model_classes"], {"2": "truck", "3": "bus"})
+                self.assertEqual(first["detected_classes"], {})
                 server.PSEUDO_JOBS[project_id] = retry
                 server.run_pseudo_job(project, retry)
                 self.assertEqual((retry["status"], retry["written"], retry["skipped"], retry["boxes"]), ("done", 1, 0, 1))
                 meta = server.sidecar_meta_path_for(folder, "sub/empty.jpg")
                 self.assertEqual(server.read_yolo_annotations(label, project, meta)[0]["label_name"], "truck")
                 self.assertEqual(predict.call_count, 2)
-                self.assertEqual(predict.call_args.kwargs, {"image_size": 320, "confidence": 0.8})
+                self.assertEqual(retry["detected_classes"], {"2": "truck"})
 
     def test_devices_get_independent_models_and_disjoint_bounded_batches(self):
         # Exercise multi-device scheduling on a CPU-only test machine.
@@ -60,10 +64,11 @@ class PseudoLabelingTests(unittest.TestCase):
         batches = defaultdict(list)
         models = {}
         saved = []
+        reported = []
 
         class Detector:
             task = "detect"
-            names = {3: "PERSON", 5: "bus"}
+            names = {3: "PERSON", 5: "bus", 7: "helmet"}
 
             def predict(self, source, device, batch, **kwargs):
                 if device.index not in models:
@@ -82,17 +87,40 @@ class PseudoLabelingTests(unittest.TestCase):
             predict_images(
                 "detect.pt", targets, [1, 3], 2,
                 lambda target, boxes: saved.extend((target, b["label_id"], b["model_label_name"]) for b in boxes),
-                image_size=960, confidence=0.0,
+                image_size=960, confidence=0.0, on_model_classes=reported.append,
             )
         self.assertIsNot(models[1], models[3])
         self.assertEqual(dict(batches), {1: [2, 2, 1], 3: [2, 2]})
-        self.assertEqual(Counter(saved), Counter((t, i, name) for t in targets for i, name in Detector.names.items()))
+        self.assertEqual(Counter(saved), Counter((t, i, Detector.names[i]) for t in targets for i in (3, 5)))
+        self.assertEqual(reported, [Detector.names])
 
     def test_incompatible_model_fails_before_saving(self):
         target = LabelTarget("folder", "a.jpg", Path("a.jpg"), Path("a.txt"))
         with patch("ultralytics.YOLO", return_value=SimpleNamespace(task="segment")):
             with self.assertRaises(ValueError):
                 predict_images("model.pt", [target], [], 1, lambda *_: self.fail("A segmentation model saved labels"))
+
+    def test_legacy_model_label_check_preserves_predictions_and_checks_model_identity(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.pt"
+            path.touch()
+            job = {"status": "done", "model_path": str(path), "detected_classes": {"0": "bus"}}
+            project = {"id": "p", "pseudo_labeling": job}
+            with (patch.object(server, "load_state", return_value={"projects": [project]}),
+                  patch.object(server, "write_state") as write,
+                  patch.object(server, "load_detector") as load):
+                load.return_value.names = {0: "person"}
+                with self.assertRaises(server.ApiError) as error:
+                    server.api_check_pseudo_classes("p", {})
+                self.assertEqual(error.exception.code, "model_classes_changed")
+                write.assert_not_called()
+                load.return_value.names = {0: "bus", 1: "helmet"}
+                server.api_check_pseudo_classes("p", {})
+                server.api_check_pseudo_classes("p", {})
+                self.assertEqual(job["model_classes"], {"0": "bus", "1": "helmet"})
+                self.assertEqual(job["detected_classes"], {"0": "bus"})
+                write.assert_called_once()
+                self.assertEqual(load.call_count, 2)
 
     def test_worker_round_trip_with_colliding_and_unregistered_classes(self):
         with TemporaryDirectory() as tmp:

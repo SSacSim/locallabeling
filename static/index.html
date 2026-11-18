@@ -317,7 +317,7 @@
                 <input id="pseudoConfidence" class="text-input" type="number" min="0" max="1" step="any" value="0.25" required>
               </label>
             </div>
-            <div class="muted">전체 이미지를 추론해 기존 수동·자동 라벨을 덮어씁니다. 미검출 이미지에는 빈 .txt 파일을 저장합니다. 탐지 박스는 모델의 클래스 번호로 저장하며, 같은 번호의 프로젝트 라벨과 이름이 다르면 경고가 표시됩니다.</div>
+            <div class="muted">전체 이미지를 추론해 기존 수동·자동 라벨을 덮어씁니다. 미검출 이미지는 빈 .txt 파일로 저장합니다. 모델의 전체 라벨을 프로젝트와 비교해 빠진 이름과 번호 차이를 표시합니다.</div>
             <div id="pseudoMessage" class="muted" role="status"></div>
           </form>
           <div class="modal-footer">
