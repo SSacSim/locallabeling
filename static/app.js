@@ -56,6 +56,7 @@
     admin: { users: [], projects: [] },
     adminActiveTab: "projects",
     adminConfigRequestId: 0,
+    pseudoDialogRequestId: 0,
     editingProjectId: "",
     folderBrowser: { currentPath: "", parentPath: "", entries: [], selectedFolders: [] },
     busy: false
@@ -102,7 +103,7 @@
       "adminProjectsView", "adminWorkersView", "adminAssignmentsView", "adminProgressView",
       "adminViewTitle", "adminViewDescription", "openProjectModalButton", "openExtractionButton",
       "pseudoDialog", "pseudoTitle", "pseudoForm", "pseudoModel", "pseudoGpus", "pseudoBatch",
-      "pseudoMessage", "startPseudoButton", "closePseudoButton",
+      "pseudoMessage", "pseudoLabelCheck", "cancelPseudoButton", "continuePseudoButton", "startPseudoButton", "closePseudoButton",
       "projectModal", "projectModalTitle", "projectModalDescription", "closeProjectModalButton", "cancelProjectModalButton", "projectNameInput",
       "projectAllowDeleteInput", "addProjectLabelButton",
       "createProjectButton", "folderPathInput", "browseFolderPathButton",
@@ -203,6 +204,8 @@
     });
     els.openProjectModalButton.addEventListener("click", openProjectModal);
     els.closePseudoButton.addEventListener("click", function () { els.pseudoDialog.close(); });
+    els.cancelPseudoButton.addEventListener("click", function () { els.pseudoDialog.close(); });
+    els.continuePseudoButton.addEventListener("click", showPseudoSettings);
     els.pseudoForm.addEventListener("submit", startPseudoLabeling);
     els.closeProjectModalButton.addEventListener("click", closeProjectModal);
     els.cancelProjectModalButton.addEventListener("click", closeProjectModal);
@@ -553,18 +556,56 @@
   async function openPseudoDialog(projectId) {
     var project = state.admin.projects.find(function (item) { return item.id === projectId; });
     if (!project || els.pseudoDialog.open) return;
-    var previous = project.pseudo_labeling || {};
+    var requestId = ++state.pseudoDialogRequestId;
     els.pseudoDialog.dataset.projectId = projectId;
     els.pseudoTitle.textContent = project.name + " · 자동 라벨링";
+    els.pseudoLabelCheck.textContent = "프로젝트에 저장된 라벨을 확인하는 중…";
+    els.pseudoLabelCheck.hidden = false;
+    els.pseudoForm.hidden = true;
+    els.continuePseudoButton.hidden = true;
+    els.startPseudoButton.hidden = true;
+    els.startPseudoButton.disabled = true;
+    els.pseudoDialog.showModal();
+    try {
+      var progress = await requestJson("/api/admin/projects/" + encodeURIComponent(projectId) + "/progress", { cache: "no-store" });
+      if (!currentPseudoDialog(requestId)) return;
+      var labeled = progress.folders.reduce(function (count, folder) { return count + folder.labeled; }, 0);
+      if (labeled > 0) {
+        var available = progress.folders.reduce(function (count, folder) { return count + folder.available; }, 0);
+        els.pseudoLabelCheck.textContent = "이미 " + labeled.toLocaleString("ko-KR") + "장에 라벨이 저장되어 있습니다. " +
+          "기존 라벨은 건너뜁니다. 현재 자동 라벨링 대상은 " + available.toLocaleString("ko-KR") + "장입니다. 설정을 계속할까요?";
+        els.continuePseudoButton.hidden = false;
+        els.cancelPseudoButton.focus();
+        return;
+      }
+      showPseudoSettings();
+    } catch (error) {
+      if (currentPseudoDialog(requestId)) els.pseudoLabelCheck.textContent = "기존 라벨을 확인하지 못했습니다. " + error.message;
+    }
+  }
+
+  function currentPseudoDialog(requestId) {
+    return els.pseudoDialog.open && requestId === state.pseudoDialogRequestId && state.user && state.user.role === "admin";
+  }
+
+  async function showPseudoSettings() {
+    var requestId = state.pseudoDialogRequestId;
+    var project = state.admin.projects.find(function (item) { return item.id === els.pseudoDialog.dataset.projectId; });
+    if (!project || !currentPseudoDialog(requestId)) return;
+    var previous = project.pseudo_labeling || {};
+    els.pseudoLabelCheck.hidden = true;
+    els.continuePseudoButton.hidden = true;
+    els.pseudoForm.hidden = false;
+    els.startPseudoButton.hidden = false;
     els.pseudoModel.value = previous.model_path || "";
     els.pseudoBatch.value = previous.batch_size || 8;
     els.pseudoGpus.replaceChildren(new Option("장치 확인 중…", ""));
     els.pseudoMessage.textContent = "";
     els.startPseudoButton.disabled = true;
-    els.pseudoDialog.showModal();
+    els.pseudoModel.focus();
     try {
       var devices = await requestJson("/api/admin/pseudo-labeling/devices");
-      if (!els.pseudoDialog.open || els.pseudoDialog.dataset.projectId !== projectId) return;
+      if (!currentPseudoDialog(requestId)) return;
       els.pseudoGpus.replaceChildren(new Option("0개 · CPU", "0"));
       for (var i = 1; i <= devices.available; i++) {
         els.pseudoGpus.add(new Option(i + "개", String(i)));
@@ -573,7 +614,7 @@
       els.pseudoMessage.textContent = "CUDA GPU " + devices.gpu_count + "개 중 " + devices.available + "개 사용 가능";
       els.startPseudoButton.disabled = false;
     } catch (error) {
-      if (els.pseudoDialog.dataset.projectId === projectId) els.pseudoMessage.textContent = error.message;
+      if (currentPseudoDialog(requestId)) els.pseudoMessage.textContent = error.message;
     }
   }
 
@@ -581,6 +622,7 @@
     event.preventDefault();
     if (els.startPseudoButton.disabled) return;
     var projectId = els.pseudoDialog.dataset.projectId;
+    var requestId = state.pseudoDialogRequestId;
     var token = state.token;
     els.startPseudoButton.disabled = true;
     try {
@@ -591,10 +633,10 @@
         }
       });
       if (state.token !== token) return;
-      if (els.pseudoDialog.open && els.pseudoDialog.dataset.projectId === projectId) els.pseudoDialog.close();
+      if (currentPseudoDialog(requestId)) els.pseudoDialog.close();
       await refreshAdmin();
     } catch (error) {
-      if (els.pseudoDialog.dataset.projectId === projectId) {
+      if (currentPseudoDialog(requestId)) {
         els.pseudoMessage.textContent = error.message;
         els.startPseudoButton.disabled = false;
       }
@@ -2737,7 +2779,7 @@
     if (!init.skipAuth && state.token) {
       headers.Authorization = "Bearer " + state.token;
     }
-    var fetchOptions = { method: init.method || "GET", headers: headers };
+    var fetchOptions = { method: init.method || "GET", headers: headers, cache: init.cache };
     if (init.body !== undefined) {
       headers["Content-Type"] = "application/json";
       fetchOptions.body = JSON.stringify(init.body);

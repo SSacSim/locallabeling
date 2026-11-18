@@ -1,7 +1,6 @@
 """Batched Ultralytics object detection on disjoint image shards."""
 
 import math
-import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,8 +26,6 @@ def predict_images(
     model_path: str, targets: list[LabelTarget], gpu_ids: list[int], batch_size: int,
     save: Callable[[LabelTarget, list[dict]], None],
 ) -> None:
-    # Use Ultralytics' restricted checkpoint loader for models opened by the server.
-    os.environ.setdefault("ULTRALYTICS_SAFE_LOAD", "1")
     from ultralytics import YOLO
     import torch
 

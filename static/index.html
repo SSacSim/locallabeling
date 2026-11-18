@@ -296,7 +296,8 @@
             <div id="pseudoTitle" class="panel-title">자동 라벨링</div>
             <button id="closePseudoButton" class="icon-button" type="button" aria-label="닫기">×</button>
           </div>
-          <form id="pseudoForm" class="modal-body">
+          <div id="pseudoLabelCheck" class="modal-body" role="status"></div>
+          <form id="pseudoForm" class="modal-body" hidden>
             <label class="field-block" for="pseudoModel"><span class="field-label">Ultralytics 객체 탐지 모델 (.pt)</span>
               <input id="pseudoModel" class="text-input" type="text" placeholder="서버의 모델 파일 경로" required>
             </label>
@@ -312,7 +313,9 @@
             <div id="pseudoMessage" class="muted" role="status"></div>
           </form>
           <div class="modal-footer">
-            <button id="startPseudoButton" class="button primary" form="pseudoForm" type="submit">자동 라벨링 시작</button>
+            <button id="cancelPseudoButton" class="button secondary" type="button">취소</button>
+            <button id="continuePseudoButton" class="button primary" type="button" hidden>설정 계속</button>
+            <button id="startPseudoButton" class="button primary" form="pseudoForm" type="submit" hidden disabled>자동 라벨링 시작</button>
           </div>
         </dialog>
 
