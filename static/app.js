@@ -55,6 +55,7 @@
     worker: { projects: [] },
     admin: { users: [], projects: [] },
     adminActiveTab: "projects",
+    adminConfigRequestId: 0,
     editingProjectId: "",
     projectLabels: defaultProjectLabels(),
     folderBrowser: { currentPath: "", parentPath: "", entries: [], selectedFolders: [] },
@@ -165,11 +166,13 @@
     els.adminRefreshButton.addEventListener("click", refreshAdmin);
     [els.adminProjectsTab, els.adminWorkersTab, els.adminAssignmentsTab, els.adminProgressTab].forEach(function (button) {
       button.addEventListener("click", function () {
-        state.adminActiveTab = button.dataset.adminTab;
-        renderAdminTabs();
+        if (state.adminActiveTab !== button.dataset.adminTab) {
+          state.adminActiveTab = button.dataset.adminTab;
+          renderAdmin();
+        }
       });
     });
-    els.progressProjectSelect.addEventListener("change", renderProgressView);
+    els.progressProjectSelect.addEventListener("change", showSelectedProgress);
     els.progressFolderBody.addEventListener("change", function (event) {
       var markSelect = event.target.closest("[data-progress-folder-mark-select]");
       if (markSelect) {
@@ -209,7 +212,7 @@
     els.createProjectButton.addEventListener("click", saveProjectFromModal);
     els.saveAssignmentButton.addEventListener("click", saveFolderAssignments);
     els.assignmentUserSelect.addEventListener("change", renderAssignmentChecklist);
-    els.assignmentProjectSelect.addEventListener("change", renderAssignmentChecklist);
+    els.assignmentProjectSelect.addEventListener("change", showAssignmentFolders);
     els.assignmentFolderChecklist.addEventListener("click", function (event) {
       var selectAllButton = event.target.closest("[data-assignment-select-all]");
       var clearAllButton = event.target.closest("[data-assignment-clear-all]");
@@ -243,7 +246,11 @@
       var removeProject = event.target.closest("[data-remove-project]");
       var removeFolder = event.target.closest("[data-remove-folder]");
       var editProject = event.target.closest("[data-edit-project]");
-      if (removeProject) {
+      var progressButton = event.target.closest("[data-project-progress]");
+      if (progressButton) {
+        state.adminActiveTab = "progress";
+        renderAdmin(progressButton.dataset.projectProgress);
+      } else if (removeProject) {
         removeProjectById(removeProject.dataset.removeProject);
       } else if (editProject) {
         openProjectEditModal(editProject.dataset.editProject);
@@ -369,6 +376,9 @@
     }
     state.token = "";
     state.user = null;
+    state.adminConfigRequestId += 1;
+    state.admin = { users: [], projects: [] };
+    state.adminActiveTab = "projects";
     state.claim = null;
     state.images = [];
     state.allImages = [];
@@ -412,15 +422,52 @@
     if (!state.user || state.user.role !== "admin") {
       return;
     }
+    var requestId = ++state.adminConfigRequestId;
     try {
-      var data = await requestJson("/api/admin/config");
+      var data = await requestJson("/api/admin/config?include_stats=false");
+      if (requestId !== state.adminConfigRequestId) {
+        return;
+      }
       state.admin = {
         users: Array.isArray(data.users) ? data.users : [],
         projects: Array.isArray(data.projects) ? data.projects : []
       };
       renderAdmin();
     } catch (error) {
-      setStatus(error.message, "error");
+      if (requestId === state.adminConfigRequestId) {
+        setStatus(error.message, "error");
+      }
+    }
+  }
+
+  function projectWithProgress(project) {
+    if (!project.folders.length || project.folders[0].total !== undefined) {
+      return project;
+    }
+    return project.progress;
+  }
+
+  async function loadProjectProgress(project) {
+    if (!project || projectWithProgress(project) || project.progressLoading) {
+      return;
+    }
+    project.progressLoading = true;
+    project.progressError = "";
+    try {
+      project.progress = await requestJson("/api/admin/projects/" + encodeURIComponent(project.id) + "/progress");
+    } catch (error) {
+      project.progressError = error.message;
+    } finally {
+      project.progressLoading = false;
+    }
+    // A config refresh or logout replaces these project objects.
+    if (state.admin.projects.indexOf(project) === -1) {
+      return;
+    }
+    if (state.adminActiveTab === "progress" && els.progressProjectSelect.value === project.id) {
+      renderProgressView(project);
+    } else if (state.adminActiveTab === "assignments" && selectedAssignmentProject() === project) {
+      renderAssignmentStats(project);
     }
   }
 
@@ -2693,15 +2740,28 @@
     }).join("");
   }
 
-  function renderAdmin() {
+  function renderAdmin(progressProjectId) {
     renderAdminTabs();
-    renderAdminSelects();
-    renderProjectList();
-    renderProgressProjectSelect();
-    renderProgressView();
-    renderWorkerList();
-    renderUserAssignments();
-    renderSelectedFolders();
+    if (state.adminActiveTab === "projects") {
+      renderProjectList();
+    } else if (state.adminActiveTab === "workers") {
+      renderWorkerList();
+    } else if (state.adminActiveTab === "assignments") {
+      if (!state.admin.assignmentsRendered) {
+        renderAdminSelects();
+        renderUserAssignments();
+        state.admin.assignmentsRendered = true;
+      } else {
+        var project = selectedAssignmentProject();
+        if (project) {
+          loadProjectProgress(project);
+          renderAssignmentStats(project);
+        }
+      }
+    } else if (state.adminActiveTab === "progress") {
+      renderProgressProjectSelect(progressProjectId);
+      showSelectedProgress();
+    }
     renderButtons();
   }
 
@@ -2745,12 +2805,17 @@
     if (projects.some(function (project) { return project.id === currentProject; })) {
       els.assignmentProjectSelect.value = currentProject;
     }
-    renderAssignmentChecklist();
+    showAssignmentFolders();
   }
 
   function selectedAssignmentProject() {
     var projectId = els.assignmentProjectSelect.value;
     return (state.admin.projects || []).find(function (item) { return item.id === projectId; });
+  }
+
+  function showAssignmentFolders() {
+    loadProjectProgress(selectedAssignmentProject());
+    renderAssignmentChecklist();
   }
 
   function renderAssignmentChecklist() {
@@ -2784,10 +2849,26 @@
       var takenText = takenByOthers.length ? " · 배정됨: " + takenByOthers.join(", ") : "";
       return '<label class="check-row' + rowClass + '">' +
         '<input type="checkbox" value="' + escapeAttribute(folder.id) + '"' + checked + disabled + '>' +
-        '<span><strong>' + escapeHtml(folder.name) + '</strong><span class="muted"> ' + escapeHtml(folder.labeled + "/" + folder.total + " 완료, 가능 " + folder.available + takenText) + '</span></span>' +
+        '<span><strong>' + escapeHtml(folder.name) + '</strong><span class="muted"> <span data-assignment-stats="' + escapeAttribute(folder.id) + '"></span>' + escapeHtml(takenText) + '</span></span>' +
         '</label>';
     }).join("");
     els.assignmentFolderChecklist.innerHTML = controls + rows;
+    renderAssignmentStats(project);
+  }
+
+  function renderAssignmentStats(project) {
+    var progress = projectWithProgress(project);
+    var folders = new Map((progress ? progress.folders : []).map(function (folder) {
+      return [folder.id, folder];
+    }));
+    els.assignmentFolderChecklist.querySelectorAll("[data-assignment-stats]").forEach(function (span) {
+      var folder = folders.get(span.dataset.assignmentStats);
+      if (folder) {
+        span.textContent = folder.labeled + "/" + folder.total + " 완료, 가능 " + folder.available;
+      } else {
+        span.textContent = project.progressLoading ? "집계 중…" : "통계 조회 불가";
+      }
+    });
   }
 
   function visibleAssignmentFolders(project) {
@@ -2817,6 +2898,7 @@
         '<div class="project-labels"><span class="muted">라벨:</span> ' + labels + '</div>' +
         '<div class="project-labels"><span class="muted">삭제:</span> ' + escapeHtml(deletePolicyText) + '</div></div>' +
         '<div class="project-actions">' +
+        '<button class="button secondary compact" data-project-progress="' + escapeAttribute(project.id) + '">진행상황</button>' +
         '<button class="button secondary compact" data-edit-project="' + escapeAttribute(project.id) + '">프로젝트 수정</button>' +
         '<button class="button danger compact" data-remove-project="' + escapeAttribute(project.id) + '">프로젝트 삭제</button>' +
         '</div></div>' +
@@ -2845,22 +2927,24 @@
   }
 
   function projectSummary(project) {
+    var progress = projectWithProgress(project);
+    project = progress || project;
     var folders = project.folders || [];
-    var totalImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.total) || 0); }, 0);
-    var progressedImages = folders.reduce(function (sum, folder) { return sum + folderProgressPosition(folder); }, 0);
-    var availableImages = folders.reduce(function (sum, folder) { return sum + (Number(folder.available) || 0); }, 0);
     var completedFolders = folders.filter(isFolderDone);
     var reviewFolders = folders.filter(isFolderReview);
-    return {
-      metrics: [
-        { label: "YOLO 폴더", value: folders.length + "개" },
-        { label: "완료 폴더", value: completedFolders.length + "/" + folders.length },
-        { label: "검수 폴더", value: reviewFolders.length + "/" + folders.length },
-        { label: "진행 이미지", value: progressedImages + "/" + totalImages },
-        { label: "작업 가능", value: availableImages + "개" }
-      ],
-      assignments: projectAssignmentSummary(project)
-    };
+    var metrics = [
+      { label: "YOLO 폴더", value: folders.length + "개" },
+      { label: "완료 폴더", value: completedFolders.length + "/" + folders.length },
+      { label: "검수 폴더", value: reviewFolders.length + "/" + folders.length }
+    ];
+    if (progress) {
+      var totalImages = folders.reduce(function (sum, folder) { return sum + folder.total; }, 0);
+      var progressedImages = folders.reduce(function (sum, folder) { return sum + folderProgressPosition(folder); }, 0);
+      var availableImages = folders.reduce(function (sum, folder) { return sum + folder.available; }, 0);
+      metrics.push({ label: "진행 이미지", value: progressedImages + "/" + totalImages },
+        { label: "작업 가능", value: availableImages + "개" });
+    }
+    return { metrics: metrics, assignments: projectAssignmentSummary(project) };
   }
 
   function folderMark(folder) {
@@ -2916,9 +3000,9 @@
     return parts.length ? escapeHtml(parts.join(", ")) : '<span class="muted">없음</span>';
   }
 
-  function renderProgressProjectSelect() {
+  function renderProgressProjectSelect(projectId) {
     var projects = state.admin.projects || [];
-    var current = els.progressProjectSelect.value;
+    var current = projectId || els.progressProjectSelect.value;
     els.progressProjectSelect.innerHTML = projects.length
       ? projects.map(function (project) { return '<option value="' + escapeAttribute(project.id) + '">' + escapeHtml(project.name) + "</option>"; }).join("")
       : '<option value="">프로젝트 없음</option>';
@@ -2927,17 +3011,27 @@
     }
   }
 
-  function renderProgressView() {
-    if (!els.progressSummaryGrid || !els.progressFolderBody) {
-      return;
-    }
+  function showSelectedProgress() {
     var projectId = els.progressProjectSelect.value;
     var project = (state.admin.projects || []).find(function (item) { return item.id === projectId; });
+    loadProjectProgress(project);
+    renderProgressView(project);
+  }
+
+  function renderProgressView(project) {
     if (!project) {
       els.progressSummaryGrid.innerHTML = "";
       els.progressFolderBody.innerHTML = '<tr><td colspan="6" class="table-empty">프로젝트를 선택하세요.</td></tr>';
       return;
     }
+    var progress = projectWithProgress(project);
+    if (!progress) {
+      els.progressSummaryGrid.innerHTML = "";
+      var message = project.progressError || "이미지 통계를 집계하는 중…";
+      els.progressFolderBody.innerHTML = '<tr><td colspan="6" class="table-empty">' + escapeHtml(message) + '</td></tr>';
+      return;
+    }
+    project = progress;
     var summary = projectSummary(project);
     els.progressSummaryGrid.innerHTML = summary.metrics.map(function (item) {
       return '<div class="summary-metric"><span>' + escapeHtml(item.label) + '</span><strong>' + escapeHtml(item.value) + '</strong></div>';

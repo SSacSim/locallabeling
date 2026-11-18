@@ -110,6 +110,8 @@ labels/
 5. 작업자 배정 영역에서 작업자와 프로젝트를 선택합니다.
 6. 표시된 YOLO 폴더 체크박스 중 작업할 폴더를 선택하고 `선택 폴더 배정 저장`을 누릅니다.
 
+프로젝트 목록은 저장된 설정과 폴더 상태로 표시합니다. 프로젝트 카드의 `진행상황`을 누르거나 할당 탭에서 프로젝트를 선택하면 해당 프로젝트의 이미지 통계를 집계합니다. 같은 프로젝트를 다시 열면 조회한 통계를 재사용하며, `새로고침`으로 최신 값을 확인할 수 있습니다.
+
 ## 작업자 흐름
 
 1. 관리자가 만든 계정으로 로그인합니다.
@@ -123,7 +125,8 @@ labels/
 - `POST /api/auth/login`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
-- `GET /api/admin/config`
+- `GET /api/admin/config` (관리자 화면은 `?include_stats=false`로 이미지 집계를 생략)
+- `GET /api/admin/projects/{project_id}/progress`
 - `POST /api/admin/users`
 - `POST /api/admin/projects`
 - `POST /api/admin/projects/remove`

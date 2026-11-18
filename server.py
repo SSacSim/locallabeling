@@ -11,6 +11,7 @@ import re
 import secrets
 import threading
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path, PurePosixPath
@@ -830,26 +831,41 @@ def project_labels_for_select(project: dict) -> list[dict]:
     ]
 
 
-def folder_stats(project: dict, folder: dict) -> dict:
-    images = [image_to_dict(project, folder, path) for path in image_files(folder)]
+def claimed_paths_by_folder(project_id: str) -> dict[str, set[str]]:
+    paths = {}
+    for claim in CLAIMS.values():
+        if claim["project_id"] == project_id:
+            paths.setdefault(claim["folder_id"], set()).add(claim["rel_path"])
+    return paths
+
+
+def folder_stats(folder: dict, claimed_paths: set[str], checkpoint: dict | None = None) -> dict:
+    rel_paths = [image_rel_path(folder, path) for path in image_files(folder)]
+    labeled = claimed = available = 0
+    for rel_path in rel_paths:
+        is_claimed = rel_path in claimed_paths
+        claimed += is_claimed
+        if yolo_label_path_for(folder, rel_path).is_file():
+            labeled += 1
+        elif not is_claimed:
+            available += 1
     return {
         **folder,
         "exists": Path(folder["images_path"]).is_dir() and Path(folder["labels_path"]).is_dir(),
-        "total": len(images),
-        "labeled": sum(1 for image in images if image["labeled"]),
-        "available": sum(1 for image in images if image["status"] == "available"),
-        "claimed": sum(1 for image in images if image["claimed"]),
+        "total": len(rel_paths),
+        "labeled": labeled,
+        "available": available,
+        "claimed": claimed,
+        "checkpoint": folder_checkpoint_summary(rel_paths, len(rel_paths), checkpoint),
     }
 
 
-def folder_checkpoint_summary(folder: dict, checkpoint: dict | None) -> dict:
-    files = image_files(folder)
-    total = len(files)
+def folder_checkpoint_summary(rel_paths: Iterable[str], total: int, checkpoint: dict | None) -> dict:
     rel_path = str((checkpoint or {}).get("rel_path") or "")
     position = 0
     if rel_path:
-        for index, image_path in enumerate(files):
-            if image_rel_path(folder, image_path) == rel_path:
+        for index, image_rel in enumerate(rel_paths):
+            if image_rel == rel_path:
                 position = index + 1
                 break
     return {
@@ -881,13 +897,14 @@ def folder_mark_summary(project: dict, folder_id: str) -> dict:
     return latest or {}
 
 
-def public_project(project: dict, include_stats: bool = True) -> dict:
+def public_project(project: dict, claimed_paths: dict[str, set[str]] | None) -> dict:
     folders = []
     folder_checkpoints = project.get("folder_checkpoints", {})
     for folder in project["folders"]:
-        folder_data = folder_stats(project, folder) if include_stats else dict(folder)
+        folder_data = dict(folder) if claimed_paths is None else folder_stats(
+            folder, claimed_paths.get(folder["id"], set()), folder_checkpoints.get(folder["id"])
+        )
         folder_data["mark"] = folder_mark_summary(project, folder["id"])
-        folder_data["checkpoint"] = folder_checkpoint_summary(folder, folder_checkpoints.get(folder["id"]))
         folders.append(folder_data)
     return {
         "id": project["id"],
@@ -913,14 +930,19 @@ def assigned_pairs_for_user(state: dict, username: str, role: str) -> list[tuple
     return pairs
 
 
-def admin_config() -> dict:
+def admin_config(include_stats: bool = True) -> dict:
     with STATE_LOCK:
-        cleanup_expired_claims()
         state = load_state()
-        return {
-            "users": [public_user(username, user) for username, user in sorted(state["users"].items())],
-            "projects": [public_project(project) for project in state["projects"]],
-        }
+        if include_stats:
+            cleanup_expired_claims()
+        projects = [
+            (project, claimed_paths_by_folder(project["id"]) if include_stats else None)
+            for project in state["projects"]
+        ]
+    return {
+        "users": [public_user(username, user) for username, user in sorted(state["users"].items())],
+        "projects": [public_project(project, claims) for project, claims in projects],
+    }
 
 
 def worker_config(user: dict) -> dict:
@@ -930,15 +952,20 @@ def worker_config(user: dict) -> dict:
         projects = []
         for project in state["projects"]:
             assigned = project["assignments"].get(user["username"], [])
+            if not assigned:
+                continue
+            claimed_paths = claimed_paths_by_folder(project["id"])
             user_marks = project.get("folder_marks", {}).get(user["username"], {})
             folder_checkpoints = project.get("folder_checkpoints", {})
             folders = []
             for folder in project["folders"]:
                 if folder["id"] not in assigned:
                     continue
-                folder_data = folder_stats(project, folder)
+                folder_data = folder_stats(
+                    folder, claimed_paths.get(folder["id"], set()), folder_checkpoints.get(folder["id"])
+                )
                 folder_data["worker_mark"] = folder_mark_summary(project, folder["id"]) or user_marks.get(folder["id"], {})
-                folder_data["worker_checkpoint"] = folder_checkpoint_summary(folder, folder_checkpoints.get(folder["id"]))
+                folder_data["worker_checkpoint"] = folder_data.pop("checkpoint")
                 folders.append(folder_data)
             if folders:
                 projects.append(
@@ -984,7 +1011,9 @@ def set_worker_checkpoint(payload: WorkerCheckpointPayload, user: dict) -> dict:
         image_path_for(folder, rel_path)
         checkpoints = project.setdefault("folder_checkpoints", {})
         checkpoints[folder_id] = {"rel_path": rel_path, "updated_at": now_text}
-        summary = folder_checkpoint_summary(folder, checkpoints[folder_id])
+        files = image_files(folder)
+        rel_paths = (image_rel_path(folder, path) for path in files)
+        summary = folder_checkpoint_summary(rel_paths, len(files), checkpoints[folder_id])
         write_state(state)
     return {"ok": True, "project_id": project_id, "folder_id": folder_id, "checkpoint": summary}
 
@@ -1071,7 +1100,7 @@ def create_project(payload: ProjectCreatePayload) -> dict:
         }
         state["projects"].append(project)
         write_state(state)
-        return {"ok": True, "project": public_project(project)}
+        return {"ok": True, "project": public_project(project, {})}
 
 
 def update_project(payload: ProjectUpdatePayload) -> dict:
@@ -1086,7 +1115,7 @@ def update_project(payload: ProjectUpdatePayload) -> dict:
         project["labels"] = labels
         write_classes_files(project)
         write_state(state)
-        return {"ok": True, "project": public_project(project)}
+        return {"ok": True, "project": public_project(project, claimed_paths_by_folder(project_id))}
 
 
 def remove_project(payload: ProjectRemovePayload) -> dict:
@@ -1111,7 +1140,7 @@ def update_project_labels(payload: ProjectLabelsPayload) -> dict:
         project["labels"] = labels
         write_classes_files(project)
         write_state(state)
-        return {"ok": True, "project": public_project(project)}
+        return {"ok": True, "project": public_project(project, claimed_paths_by_folder(project_id))}
 
 
 def add_yolo_folders(payload: YoloFolderPayload) -> dict:
@@ -1148,7 +1177,7 @@ def add_yolo_folders(payload: YoloFolderPayload) -> dict:
                 "created_at": utc_iso(),
             }
             project["folders"].append(folder)
-            added.append(folder_stats(project, folder))
+            added.append(folder_stats(folder, set()))
         write_classes_files(project)
         write_state(state)
     return {"ok": True, "added": added, "count": len(added)}
@@ -1663,8 +1692,17 @@ def api_logout(user: dict = Depends(current_user)) -> dict:
 
 
 @app.get("/api/admin/config")
-def api_admin_config(_: dict = Depends(require_admin)) -> dict:
-    return admin_config()
+def api_admin_config(include_stats: bool = True, _: dict = Depends(require_admin)) -> dict:
+    return admin_config(include_stats)
+
+
+@app.get("/api/admin/projects/{project_id}/progress")
+def api_admin_project_progress(project_id: str, _: dict = Depends(require_admin)) -> dict:
+    with STATE_LOCK:
+        project = project_by_id(load_state(), project_id)
+        cleanup_expired_claims()
+        claimed_paths = claimed_paths_by_folder(project_id)
+    return public_project(project, claimed_paths)
 
 
 @app.get("/api/admin/folders/browse")
